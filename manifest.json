@@ -1,0 +1,21 @@
+
+{
+  "id": "./",
+  "name": "MORNI — Smart Morning Ecosystem",
+  "short_name": "MORNI",
+  "description": "Your personal smart morning routine ecosystem.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#10251c",
+  "theme_color": "#10251c",
+  "icons": [
+    {
+      "src": "./logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

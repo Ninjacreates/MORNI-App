@@ -1,0 +1,5576 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* =========================================================
+   MORNI — Smart Morning Ecosystem
+   Complete app.js replacement
+   Requires config.js to load before this file.
+   ========================================================= */
+
+(() => {
+  "use strict";
+
+  const CFG = window.MORNI_CONFIG || {};
+
+  const STORE = "morni_v4_designer";
+  const XP_STORE = "morni_v4_progress";
+  const CONNECTION_STORE = "morni_connection_settings_v1";
+
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+  const today = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+
+  const safe = value =>
+    String(value ?? "").replace(/[&<>"']/g, char => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    })[char]);
+
+  const read = (key, fallback) => {
+    try {
+      return JSON.parse(localStorage.getItem(key)) ?? fallback;
+    } catch {
+      return fallback;
+    }
+  };
+
+  const write = (key, value) => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (error) {
+      console.warn("MORNI could not save local data:", error);
+    }
+  };
+
+  /* ---------------------------------------------------------
+     CONNECTION SETTINGS
+     --------------------------------------------------------- */
+
+  const savedConnection = read(CONNECTION_STORE, {});
+
+  // Demo-first default keeps MORNI fully presentable when the physical station is unfinished.
+  // A previously saved, explicit live selection is still respected.
+  let connectionMode = savedConnection.mode || "demo";
+
+  if (!["demo", "live"].includes(connectionMode)) {
+    connectionMode = "demo";
+  }
+
+  let deviceBaseUrl = String(
+    savedConnection.deviceBaseUrl || CFG.deviceBaseUrl || ""
+  ).trim().replace(/\/+$/, "");
+
+  const isDemoMode = () => connectionMode === "demo";
+
+  function saveConnectionSettings() {
+    write(CONNECTION_STORE, {
+      mode: connectionMode,
+      deviceBaseUrl
+    });
+  }
+
+  function endpoint(name, fallback) {
+    return CFG.endpoints?.[name] || fallback;
+  }
+
+  function makeDeviceUrl(path) {
+    if (!deviceBaseUrl) {
+      throw new Error("Enter your ESP8266 IP address in Settings.");
+    }
+
+    const cleanPath = String(path || "").trim();
+
+    if (/^https?:\/\//i.test(cleanPath)) {
+      throw new Error("Use a device endpoint, not a full URL.");
+    }
+
+    return `${deviceBaseUrl}${cleanPath.startsWith("/") ? "" : "/"}${cleanPath}`;
+  }
+
+  function validDeviceAddress(value) {
+    try {
+      const url = new URL(value);
+      return (
+        (url.protocol === "http:" || url.protocol === "https:") &&
+        !!url.hostname &&
+        !url.username &&
+        !url.password
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /* ---------------------------------------------------------
+     DEVICE NETWORK REQUESTS
+     --------------------------------------------------------- */
+
+  async function request(path, options = {}) {
+    const url = makeDeviceUrl(path);
+    const timeoutMs = Number(
+      CFG.requestTimeoutMs || CFG.requestTimeout || 3500
+    );
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        method: options.method || "GET",
+        headers: {
+          Accept: "application/json",
+          ...(options.headers || {})
+        },
+        signal: controller.signal,
+        mode: "cors",
+        cache: "no-store"
+      });
+
+      const bodyText = await response.text();
+      let data = {};
+
+      if (bodyText) {
+        try {
+          data = JSON.parse(bodyText);
+        } catch {
+          data = { message: bodyText };
+        }
+      }
+
+      if (!response.ok) {
+        throw new Error(
+          data.error ||
+          data.message ||
+          `ESP8266 returned HTTP ${response.status}`
+        );
+      }
+
+      return data;
+    } catch (error) {
+      if (error.name === "AbortError") {
+        throw new Error("Connection timed out. Check the ESP8266 IP and Wi-Fi.");
+      }
+
+      if (error instanceof TypeError) {
+        throw new Error(
+          "Browser could not reach the ESP8266. Check Wi-Fi, IP address, CORS and browser local-network permissions."
+        );
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function sendCommand(path, label) {
+    if (isDemoMode()) {
+      toast("Demo mode: no physical command was sent.");
+      return false;
+    }
+
+    if (!state.device.online) {
+      toast("Station is offline. No command was sent.");
+      return false;
+    }
+
+    if (!state.device.hardwareReady) {
+      toast("Hardware is not confirmed ready. Command locked.");
+      return false;
+    }
+
+    try {
+      await request(path);
+      if (label) toast(label);
+      return true;
+    } catch (error) {
+      state.device.lastError = error.message;
+      save();
+      updateConnection();
+      toast(`Command failed: ${error.message}`);
+      return false;
+    }
+  }
+
+  /* ---------------------------------------------------------
+     STATE AND MIGRATION
+     --------------------------------------------------------- */
+
+  const defaultState = () => ({
+    profile: {
+      name: CFG.defaultUser || "MORNI User",
+      wakeTime: "06:30"
+    },
+
+    date: today(),
+    theme: "light",
+
+    routine: {
+      started: false,
+      complete: false,
+      toothbrush: false,
+      brushingComplete: false,
+      handwash: false
+    },
+
+    checklist: {
+      uniform: false,
+      bag: false,
+      bottle: false,
+      homework: false
+    },
+
+    timer: {
+      running: false,
+      remaining: 120,
+      endsAt: 0
+    },
+
+    streak: 0,
+    bestStreak: 0,
+    lastCompleteDate: "",
+    history: [],
+
+    counts: {
+      handwash: 0,
+      brush: 0
+    },
+
+    capacity: {
+      handwash: Number(CFG.refill?.handwashCapacity || 250)
+    },
+
+    used: {
+      handwash: 0
+    },
+
+    average: {
+      handwash: Number(CFG.refill?.handwashPerUse || 2)
+    },
+
+    device: {
+      online: false,
+      ip: "Not connected",
+      lastSeen: 0,
+      hardwareReady: false,
+      mode: "unknown",
+      lastError: ""
+    },
+
+    activity: [],
+    seenEvents: [],
+    mode: "auto",
+    startTime: null
+  });
+
+  const legacyState = read("morni_v3", null);
+  const legacyXP = read("morni_plus_v1", null);
+
+  const migratedState = legacyState ? {
+    profile: legacyState.profile,
+    date: legacyState.date,
+    theme: legacyState.theme,
+
+    routine: {
+      started: !!(legacyState.routine?.brush || legacyState.routine?.handwash),
+      complete: false,
+      toothbrush: false,
+      brushingComplete: !!legacyState.routine?.brush,
+      handwash: !!legacyState.routine?.handwash
+    },
+
+    checklist: legacyState.checklist,
+    streak: legacyState.streak,
+    bestStreak: legacyState.bestStreak,
+    lastCompleteDate: legacyState.lastCompleteDate,
+    history: legacyState.history,
+
+    counts: {
+      handwash: legacyState.counts?.handwash || 0,
+      brush: legacyState.counts?.brush || 0
+    },
+
+    capacity: {
+      handwash: legacyState.capacity?.handwash || 250
+    },
+
+    used: {
+      handwash: legacyState.used?.handwash || 0
+    },
+
+    average: {
+      handwash: legacyState.average?.handwash || 2
+    },
+
+    activity: legacyState.activity
+  } : {};
+
+  let state = Object.assign(
+    defaultState(),
+    migratedState,
+    read(STORE, {})
+  );
+
+  const fresh = defaultState();
+
+  for (const key of [
+    "profile",
+    "routine",
+    "checklist",
+    "timer",
+    "counts",
+    "capacity",
+    "used",
+    "average",
+    "device"
+  ]) {
+    state[key] = Object.assign({}, fresh[key], state[key] || {});
+  }
+
+  if (!Array.isArray(state.history)) state.history = [];
+  if (!Array.isArray(state.activity)) state.activity = [];
+  if (!Array.isArray(state.seenEvents)) state.seenEvents = [];
+
+  if (state.date !== today()) {
+    state.date = today();
+    state.routine = { ...fresh.routine };
+    state.checklist = { ...fresh.checklist };
+    state.timer = { ...fresh.timer };
+    state.startTime = null;
+  }
+
+  let xp = Object.assign(
+    {
+      points: 0,
+      unlocked: [],
+      missionDate: today(),
+      missions: [],
+      fullDays: 0
+    },
+    legacyXP ? {
+      points: legacyXP.xp || 0,
+      unlocked: legacyXP.unlocked || [],
+      missionDate: legacyXP.missionDate || today(),
+      missions: legacyXP.missionDone || [],
+      fullDays: legacyXP.fullDays || 0
+    } : {},
+    read(XP_STORE, {})
+  );
+
+  if (!Array.isArray(xp.unlocked)) xp.unlocked = [];
+  if (!Array.isArray(xp.missions)) xp.missions = [];
+
+  if (xp.missionDate !== today()) {
+    xp.missionDate = today();
+    xp.missions = [];
+  }
+
+  let page = "home";
+  let timerLoop = null;
+  let pollLoop = null;
+  let toastLoop = null;
+  let pollBusy = false;
+
+  /* ---------------------------------------------------------
+     ROUTINE DATA
+     --------------------------------------------------------- */
+
+  const steps = [
+    {
+      id: "toothbrush",
+      title: "Brush your teeth",
+      detail: "A complete two-minute brushing session",
+      icon: "✳",
+      time: "02:00"
+    },
+    {
+      id: "handwash",
+      title: "Wash your hands",
+      detail: "A fresh, clean finish",
+      icon: "◌",
+      time: "30 sec"
+    }
+  ];
+
+  const missions = [
+    {
+      id: "start",
+      title: "Start with intention",
+      desc: "Activate your MORNI routine",
+      test: () => state.routine.started
+    },
+    {
+      id: "brush",
+      title: "Two-minute focus",
+      desc: "Finish your brushing session",
+      test: () => state.routine.brushingComplete
+    },
+    {
+      id: "clean",
+      title: "Clean hands",
+      desc: "Complete a handwash",
+      test: () => state.counts.handwash > 0
+    },
+    {
+      id: "school",
+      title: "Ready to roll",
+      desc: "Finish your school checklist",
+      test: () => Object.values(state.checklist).every(Boolean)
+    }
+  ];
+
+  const achievements = [
+    ["first", "First light", "Start your first MORNI routine"],
+    ["brush", "Two-minute club", "Complete your first brushing session"],
+    ["hands", "Fresh hands", "Complete your first handwash"],
+    ["routine", "Morning mastered", "Complete your first full routine"],
+    ["streak3", "Consistency", "Build a 3-day routine streak"],
+    ["streak7", "One week strong", "Build a 7-day streak"],
+    ["school", "School-ready", "Complete your school checklist"],
+    ["connected", "Connected", "Connect to your MORNI station"],
+    ["xp100", "Century", "Earn 100 MORNI points"],
+    ["streak14", "Two weeks strong", "Reach a 14-day streak"],
+    ["streak30", "A month of mornings", "Reach a 30-day streak"],
+    ["brush10", "Brushing regular", "Complete 10 brushing sessions"],
+    ["brush25", "Brushing champion", "Complete 25 brushing sessions"],
+    ["hands10", "Clean routine", "Complete 10 handwash events"],
+    ["hands50", "Freshness expert", "Complete 50 handwash events"],
+    ["routines5", "Getting consistent", "Complete 5 full routines"],
+    ["routines10", "Habit builder", "Complete 10 full routines"],
+    ["routines25", "Morning legend", "Complete 25 full routines"],
+    ["xp500", "Rising star", "Earn 500 MORNI points"],
+    ["xp1000", "MORNI elite", "Earn 1,000 MORNI points"],
+    ["perfectweek", "Perfect week", "Complete seven mornings in a row"]
+  ];
+
+  const save = () => {
+    write(STORE, state);
+    write(XP_STORE, xp);
+  };
+
+  const fmt = seconds =>
+    `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+
+  const time = value =>
+    new Date(value).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+
+  const dateText = () =>
+    new Date().toLocaleDateString([], {
+      weekday: "long",
+      month: "long",
+      day: "numeric"
+    });
+
+  function toast(message) {
+    let element = $("#toast");
+
+    if (!element) {
+      element = document.createElement("div");
+      element.id = "toast";
+      element.className = "toast";
+      document.body.append(element);
+    }
+
+    element.textContent = message;
+    element.classList.add("show");
+
+    clearTimeout(toastLoop);
+
+    toastLoop = setTimeout(() => {
+      element.classList.remove("show");
+    }, 2600);
+  }
+
+  function log(title, detail = "", kind = "activity") {
+    state.activity.unshift({
+      id: `${Date.now()}-${Math.random()}`,
+      time: new Date().toISOString(),
+      title,
+      detail,
+      kind
+    });
+
+    state.activity = state.activity.slice(0, 60);
+    save();
+  }
+
+  function award(id, amount, label) {
+    const key = `${id}-${today()}`;
+
+    if (xp.missions.includes(key)) return;
+
+    xp.missions.push(key);
+    xp.points += amount;
+
+    toast(`+${amount} MORNI points · ${label}`);
+    save();
+  }
+
+  function unlock(id) {
+    if (xp.unlocked.includes(id)) return;
+
+    xp.unlocked.push(id);
+    xp.points += 15;
+
+    const achievement = achievements.find(item => item[0] === id);
+
+    toast(`Achievement unlocked · ${achievement?.[1] || id}`);
+    log("Achievement unlocked", achievement?.[1] || id, "achievement");
+  }
+
+  const level = () => Math.floor(Math.sqrt(xp.points / 40)) + 1;
+
+  const nextXP = () =>
+    Math.max(0, level() * level() * 40 - xp.points);
+
+  const completed = () =>
+    Number(state.routine.brushingComplete) +
+    Number(state.routine.handwash);
+
+  const progress = () =>
+    Math.round(completed() / 2 * 100);
+
+  function checkAchievements() {
+    if (state.routine.started) unlock("first");
+    if (state.routine.brushingComplete) unlock("brush");
+    if (state.counts.handwash > 0) unlock("hands");
+    if (completed() === 2) unlock("routine");
+
+    if (state.streak >= 3) unlock("streak3");
+    if (state.streak >= 7) unlock("streak7");
+    if (state.streak >= 14) unlock("streak14");
+    if (state.streak >= 30) unlock("streak30");
+
+    if (Object.values(state.checklist).every(Boolean)) unlock("school");
+    if (state.device.online) unlock("connected");
+
+    if (state.counts.brush >= 10) unlock("brush10");
+    if (state.counts.brush >= 25) unlock("brush25");
+    if (state.counts.handwash >= 10) unlock("hands10");
+    if (state.counts.handwash >= 50) unlock("hands50");
+
+    if (state.history.length >= 5) unlock("routines5");
+    if (state.history.length >= 10) unlock("routines10");
+    if (state.history.length >= 25) unlock("routines25");
+
+    if (state.history.length >= 7) {
+      const lastSeven = state.history.slice(-7);
+      const uniqueDays = new Set(lastSeven.map(item => item.date));
+
+      if (uniqueDays.size === 7) unlock("perfectweek");
+    }
+
+    if (xp.points >= 100) unlock("xp100");
+    if (xp.points >= 500) unlock("xp500");
+    if (xp.points >= 1000) unlock("xp1000");
+
+    missions.forEach(mission => {
+      if (mission.test()) {
+        award(`mission-${mission.id}`, 5, mission.title);
+      }
+    });
+  }
+
+  /* ---------------------------------------------------------
+     ROUTINE ACTIONS
+     --------------------------------------------------------- */
+
+  function startRoutine(source = "app") {
+    if (state.routine.started) return;
+
+    state.routine.started = true;
+    state.startTime = new Date().toISOString();
+
+    log("MORNI routine started", source);
+    award("start", 10, "Routine started");
+
+    checkAchievements();
+    save();
+    render();
+
+    toast("Your morning has officially started.");
+  }
+
+  function finishRoutineIfReady() {
+    if (completed() !== 2 || state.routine.complete) return;
+
+    state.routine.complete = true;
+
+    const yesterdayDate = new Date();
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+
+    const yesterday =
+      `${yesterdayDate.getFullYear()}-${String(yesterdayDate.getMonth() + 1).padStart(2, "0")}-${String(yesterdayDate.getDate()).padStart(2, "0")}`;
+
+    state.streak =
+      state.lastCompleteDate === yesterday
+        ? state.streak + 1
+        : 1;
+
+    state.bestStreak = Math.max(state.bestStreak, state.streak);
+    state.lastCompleteDate = today();
+
+    state.history.push({
+      date: today(),
+      score: 100
+    });
+
+    state.history = state.history.slice(-60);
+    xp.fullDays++;
+
+    award("complete", 30, "Morning routine complete");
+    log("Morning routine completed", "All hygiene steps complete", "success");
+
+    toast("Beautiful work. MORNI routine complete!");
+
+    checkAchievements();
+    save();
+  }
+
+  function completeBrush(source = "app") {
+    if (state.routine.brushingComplete) return;
+
+    state.routine.brushingComplete = true;
+    state.routine.toothbrush = false;
+    state.counts.brush++;
+
+    state.timer = {
+      running: false,
+      remaining: 0,
+      endsAt: 0
+    };
+
+    clearInterval(timerLoop);
+
+    award("brush", 20, "Brushing complete");
+    log("Brushing completed", source);
+
+    finishRoutineIfReady();
+    checkAchievements();
+    save();
+    render();
+  }
+
+  function markHandwash(source = "app") {
+    if (state.routine.handwash) return;
+
+    state.routine.handwash = true;
+    state.counts.handwash++;
+
+    state.used.handwash += Number(state.average.handwash || 2);
+
+    award("handwash", 15, "Handwash complete");
+    log("Handwash completed", source);
+
+    finishRoutineIfReady();
+    checkAchievements();
+    save();
+    render();
+  }
+
+  /* ---------------------------------------------------------
+     TIMER
+     --------------------------------------------------------- */
+
+  function timerStart(source = "app") {
+    if (state.timer.running || state.routine.brushingComplete) return;
+
+    startRoutine(source);
+
+    state.routine.toothbrush = true;
+    state.timer.running = true;
+    state.timer.endsAt = Date.now() + state.timer.remaining * 1000;
+
+    log("Brushing timer started", "Two-minute session");
+
+    if (!isDemoMode()) {
+      sendCommand(endpoint("timerStart", "/timer?cmd=start"), "Timer command sent");
+    }
+
+    save();
+    startTimerLoop();
+    render();
+  }
+
+  function timerPause() {
+    if (!state.timer.running) return;
+
+    state.timer.remaining = Math.max(
+      0,
+      Math.ceil((state.timer.endsAt - Date.now()) / 1000)
+    );
+
+    state.timer.running = false;
+    state.timer.endsAt = 0;
+
+    clearInterval(timerLoop);
+
+    if (!isDemoMode()) {
+      sendCommand(endpoint("timerPause", "/timer?cmd=pause"), "Pause command sent");
+    }
+
+    save();
+    render();
+  }
+
+  function timerReset() {
+    state.timer = {
+      running: false,
+      remaining: 120,
+      endsAt: 0
+    };
+
+    state.routine.toothbrush = false;
+
+    clearInterval(timerLoop);
+
+    if (!isDemoMode()) {
+      sendCommand(endpoint("timerReset", "/timer?cmd=reset"), "Reset command sent");
+    }
+
+    save();
+    render();
+  }
+
+  function startTimerLoop() {
+    clearInterval(timerLoop);
+
+    timerLoop = setInterval(() => {
+      if (!state.timer.running) return;
+
+      state.timer.remaining = Math.max(
+        0,
+        Math.ceil((state.timer.endsAt - Date.now()) / 1000)
+      );
+
+      const digits = $("#timerDigits");
+      const ring = $("#timerProgress");
+
+      if (digits) digits.textContent = fmt(state.timer.remaining);
+
+      if (ring) {
+        ring.style.setProperty(
+          "--ring",
+          `${(120 - state.timer.remaining) / 120 * 360}deg`
+        );
+      }
+
+      if (state.timer.remaining <= 0) {
+        completeBrush("timer");
+      }
+    }, 200);
+  }
+
+  function toggleChecklist(id) {
+    if (!(id in state.checklist)) return;
+
+    state.checklist[id] = !state.checklist[id];
+
+    if (Object.values(state.checklist).every(Boolean)) {
+      award("school", 15, "School checklist complete");
+      log("School checklist completed");
+      checkAchievements();
+    }
+
+    save();
+    render();
+  }
+
+  function simulateEvent(type) {
+    if (!isDemoMode()) {
+      toast("Switch to demo mode to preview simulated events.");
+      return;
+    }
+
+    if (type === "start") {
+      startRoutine("demo control");
+    }
+
+    if (type === "toothbrush") {
+      if (state.routine.brushingComplete) {
+        toast("Brushing is already complete today.");
+        return;
+      }
+
+      state.timer.remaining = 120;
+      timerStart("demo toothbrush pickup");
+    }
+
+    if (type === "handwash") {
+      startRoutine("demo handwash");
+      markHandwash("demo control");
+    }
+
+    if (type === "completeBrush") {
+      completeBrush("demo control");
+    }
+  }
+
+  /* ---------------------------------------------------------
+     DEVICE EVENTS
+     --------------------------------------------------------- */
+
+  function processEvent(event) {
+    if (!event || typeof event !== "object") return;
+
+    const id = String(
+      event.id ||
+      event.eventId ||
+      event.timestamp ||
+      `${event.type}-${event.time || ""}`
+    );
+
+    if (state.seenEvents.includes(id)) return;
+
+    state.seenEvents.push(id);
+    state.seenEvents = state.seenEvents.slice(-150);
+
+    const type = String(
+      event.type || event.event || event.name || ""
+    ).toLowerCase().replace(/[\s-]+/g, "_");
+
+    const source = "ESP8266";
+
+    if (
+      type.includes("routine_started") ||
+      type.includes("start_touched") ||
+      type === "start"
+    ) {
+      startRoutine(source);
+    } else if (
+      type.includes("toothbrush_removed") ||
+      type.includes("brush_pickup") ||
+      type.includes("toothbrush_picked") ||
+      type.includes("brushing_started")
+    ) {
+      if (!state.routine.brushingComplete) {
+        startRoutine(source);
+        state.routine.toothbrush = true;
+
+        if (!state.timer.running) {
+          state.timer.remaining = 120;
+          timerStart(source);
+        }
+      }
+    } else if (type.includes("brush_progress")) {
+      const remaining = Number(
+        event.remaining ?? event.secondsRemaining
+      );
+
+      if (Number.isFinite(remaining)) {
+        state.timer.remaining = Math.max(
+          0,
+          Math.min(120, remaining)
+        );
+
+        if (state.timer.running) {
+          state.timer.endsAt =
+            Date.now() + state.timer.remaining * 1000;
+        }
+      }
+    } else if (
+      type.includes("brush_complete") ||
+      type.includes("brushing_complete")
+    ) {
+      completeBrush(source);
+    } else if (type.includes("handwash")) {
+      markHandwash(source);
+    } else if (type.includes("routine_complete")) {
+      state.routine.brushingComplete = true;
+      state.routine.handwash = true;
+      finishRoutineIfReady();
+    } else if (
+      type.includes("toothbrush_placed") ||
+      type.includes("brush_return")
+    ) {
+      state.routine.toothbrush = false;
+      log("Toothbrush returned", source);
+    }
+
+    save();
+  }
+
+  /* ---------------------------------------------------------
+     DEVICE POLLING
+     --------------------------------------------------------- */
+
+  async function pollDevice() {
+    if (pollBusy) return;
+
+    if (isDemoMode()) {
+      state.device.online = false;
+      state.device.hardwareReady = false;
+      state.device.mode = "demo";
+      state.device.ip = "Demo mode";
+      state.device.lastError = "";
+
+      updateConnection();
+
+      if (page === "device" || page === "home") {
+        refreshLiveBits();
+      }
+
+      return;
+    }
+
+    pollBusy = true;
+
+    try {
+      const data = await request(
+        endpoint("status", "/status")
+      );
+
+      state.device.online = data.online !== false;
+      state.device.lastSeen = Date.now();
+      state.device.ip = deviceBaseUrl || "Connected";
+
+      state.device.hardwareReady =
+        data.hardwareConnected === true ||
+        data.hardwareReady === true;
+
+      state.device.mode = data.mode || "connected";
+      state.device.lastError = "";
+
+      if (Array.isArray(data.events)) {
+        data.events.forEach(processEvent);
+      }
+
+      if (typeof data.toothbrushPresent === "boolean") {
+        state.routine.toothbrush = data.toothbrushPresent;
+      }
+
+      if (
+        typeof data.brushingRemaining === "number" &&
+        state.timer.running
+      ) {
+        state.timer.remaining = Math.max(
+          0,
+          Math.min(120, data.brushingRemaining)
+        );
+      }
+
+      try {
+        const eventData = await request(
+          endpoint("events", "/events")
+        );
+
+        if (Array.isArray(eventData.events)) {
+          eventData.events.forEach(processEvent);
+        }
+      } catch (eventError) {
+        // Status can still be useful even if the events endpoint fails.
+        console.warn("MORNI events endpoint:", eventError.message);
+      }
+
+      checkAchievements();
+
+    } catch (error) {
+      state.device.lastError = error.message || "Unable to reach station";
+      state.device.online = false;
+      state.device.hardwareReady = false;
+    } finally {
+      pollBusy = false;
+
+      save();
+      updateConnection();
+
+      if (page === "device" || page === "home") {
+        refreshLiveBits();
+      }
+    }
+  }
+
+  function updateConnection() {
+    const demo = isDemoMode();
+    const online = !demo && state.device.online;
+
+    const side = $("#sideConnection");
+
+    if (side) {
+      side.textContent = demo
+        ? "Demo mode active"
+        : online
+          ? "ESP8266 connected"
+          : "Device offline";
+    }
+
+    const ip = $("#sideIp");
+
+    if (ip) {
+      ip.textContent = demo
+        ? "Hardware disconnected"
+        : online
+          ? deviceBaseUrl
+          : "Check Wi-Fi connection";
+    }
+
+    const dot = $("#sideDot");
+
+    if (dot) {
+      dot.classList.toggle("online", online);
+    }
+
+    const pill = $("#modePill");
+
+    if (pill) {
+      pill.textContent = demo ? "DEMO MODE" : "LIVE DEVICE";
+      pill.classList.toggle("live", !demo);
+    }
+
+    const avatar = $("#avatar");
+
+    if (avatar) {
+      avatar.textContent = (state.profile.name || "M")
+        .trim()
+        .slice(0, 1)
+        .toUpperCase();
+    }
+  }
+
+  /* ---------------------------------------------------------
+     UI HELPERS
+     --------------------------------------------------------- */
+
+  const card = (title, content, cls = "") =>
+    `<section class="panel ${cls}">
+      <div class="panel-heading"><h2>${title}</h2></div>
+      ${content}
+    </section>`;
+
+  const progressBar = value =>
+    `<div class="track">
+      <span style="width:${Math.max(0, Math.min(100, value))}%"></span>
+    </div>`;
+
+  function greeting() {
+    const hour = new Date().getHours();
+
+    return hour < 11
+      ? "Good morning"
+      : hour < 17
+        ? "Hello there"
+        : "Good evening";
+  }
+
+  function coach() {
+    if (state.routine.complete) {
+      return "You did it. Your essentials are complete — take that fresh-start feeling into the day.";
+    }
+
+    if (!state.routine.started) {
+      return "A calmer morning starts with one small action. Tap start when you're ready.";
+    }
+
+    if (!state.routine.brushingComplete) {
+      return "Give your brushing session two focused minutes. MORNI will keep the time for you.";
+    }
+
+    if (!state.routine.handwash) {
+      return "One last hygiene step: wash your hands and you're ready to go.";
+    }
+
+    return "One step at a time. You're building a routine that works for you.";
+  }
+
+  function miniTimeline() {
+    if (!state.activity.length) {
+      return `<div class="empty-state">
+        <span class="empty-orbit">✦</span>
+        <b>Your morning story starts here</b>
+        <small>Routine events will appear here as you use MORNI.</small>
+      </div>`;
+    }
+
+    return `<div class="activity-list">
+      ${state.activity.slice(0, 5).map(item => `
+        <div class="activity-row">
+          <span class="activity-symbol">
+            ${item.kind === "success" ? "✓" : item.kind === "achievement" ? "✧" : "•"}
+          </span>
+          <div>
+            <b>${safe(item.title)}</b>
+            <small>${safe(item.detail)}</small>
+          </div>
+          <time>${time(item.time)}</time>
+        </div>
+      `).join("")}
+    </div>`;
+  }
+
+  
+function twin() {
+  const online = state.device.online;
+  const ready = state.device.hardwareReady;
+  const brushing = state.timer.running;
+  const complete = state.routine.complete;
+
+  const screenTitle = complete
+    ? "ROUTINE COMPLETE"
+    : brushing
+      ? "BRUSHING IN PROGRESS"
+      : state.routine.started
+        ? "MORNING IN MOTION"
+        : "READY WHEN YOU ARE";
+
+  const screenTime = brushing
+    ? fmt(Math.max(0, Math.ceil((state.timer.endsAt - Date.now()) / 1000)))
+    : new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit"
+      });
+
+  return `
+    <div style="
+      position:relative;
+      width:100%;
+      min-height:300px;
+      padding:18px 10px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      overflow:hidden;
+      border-radius:18px;
+      background:linear-gradient(145deg,#e9f3e9,#f8edda);
+      isolation:isolate;
+    ">
+      <div style="
+        position:absolute;
+        width:230px;height:230px;
+        border-radius:50%;
+        background:rgba(235,174,75,.19);
+        filter:blur(3px);
+        top:30px;left:50%;
+        transform:translateX(-50%);
+      "></div>
+
+      <div style="
+        position:absolute;
+        width:260px;height:260px;
+        border:1px solid rgba(48,103,68,.16);
+        border-radius:50%;
+        top:20px;left:50%;
+        transform:translateX(-50%);
+      "></div>
+
+      <div style="
+        position:absolute;
+        width:205px;height:205px;
+        border:1px dashed rgba(48,103,68,.20);
+        border-radius:50%;
+        top:48px;left:50%;
+        transform:translateX(-50%);
+      "></div>
+
+      <div style="
+        position:relative;
+        z-index:1;
+        width:min(100%,260px);
+        filter:drop-shadow(0 16px 18px rgba(26,61,39,.17));
+      ">
+        <svg viewBox="0 0 300 310"
+          role="img"
+          aria-label="MORNI smart morning station illustration"
+          style="display:block;width:100%;height:auto;overflow:visible">
+
+          <defs>
+            <linearGradient id="morniTwinBody" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#fffdf5"/>
+              <stop offset="1" stop-color="#dce9d9"/>
+            </linearGradient>
+
+            <linearGradient id="morniTwinScreen" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#183e2d"/>
+              <stop offset="1" stop-color="#0d281d"/>
+            </linearGradient>
+
+            <linearGradient id="morniTwinBottle" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#f4c16e"/>
+              <stop offset="1" stop-color="#df8c3e"/>
+            </linearGradient>
+          </defs>
+
+          <ellipse cx="150" cy="286" rx="112" ry="12"
+            fill="#234c35" opacity=".13"/>
+
+          <rect x="24" y="105" width="35" height="104" rx="13"
+            fill="#d4e3d2" stroke="#a8c3a8" stroke-width="2"/>
+          <rect x="241" y="105" width="35" height="104" rx="13"
+            fill="#d4e3d2" stroke="#a8c3a8" stroke-width="2"/>
+
+          <circle cx="41.5" cy="123" r="5" fill="#e9a84c"/>
+          <circle cx="258.5" cy="123" r="5" fill="#e9a84c"/>
+
+          <rect x="47" y="36" width="206" height="240" rx="30"
+            fill="url(#morniTwinBody)"
+            stroke="#b4cbb4"
+            stroke-width="3"/>
+
+          <path d="M77 36 H223 Q253 36 253 66 V83 H47 V66 Q47 36 77 36Z"
+            fill="#244d35"/>
+
+          <text x="150" y="65"
+            text-anchor="middle"
+            font-size="16"
+            font-weight="800"
+            letter-spacing="3"
+            fill="#fff9e9">MORNI</text>
+
+          <circle cx="225" cy="59" r="5"
+            fill="${online ? "#7ee09a" : "#e8a84c"}"/>
+
+          <rect x="67" y="99" width="166" height="82" rx="12"
+            fill="url(#morniTwinScreen)"
+            stroke="#91ad8f"
+            stroke-width="3"/>
+
+          <text x="150" y="120"
+            text-anchor="middle"
+            font-size="8"
+            font-weight="700"
+            letter-spacing="1.3"
+            fill="#b9d8b6">SMART MORNING STATION</text>
+
+          <text x="150" y="143"
+            text-anchor="middle"
+            font-size="${screenTitle.length > 17 ? "9" : "11"}"
+            font-weight="800"
+            fill="#fff5dc">${screenTitle}</text>
+
+          <text x="150" y="165"
+            text-anchor="middle"
+            font-size="17"
+            font-weight="700"
+            fill="#f3bd68">${screenTime}</text>
+
+          <circle cx="119" cy="198" r="5"
+            fill="${state.routine.brushingComplete ? "#4a9b61" : "#c5d6c3"}"/>
+          <circle cx="150" cy="198" r="5"
+            fill="${state.routine.handwash ? "#4a9b61" : "#c5d6c3"}"/>
+          <circle cx="181" cy="198" r="5"
+            fill="${ready ? "#4a9b61" : "#e2a14c"}"/>
+
+          <rect x="69" y="218" width="162" height="40" rx="12"
+            fill="#e3eddf" stroke="#c2d5bf"/>
+
+          <text x="150" y="234"
+            text-anchor="middle"
+            font-size="8"
+            font-weight="800"
+            letter-spacing="1"
+            fill="#315b3d">YOUR MORNING COMPANION</text>
+
+          <text x="150" y="248"
+            text-anchor="middle"
+            font-size="8"
+            fill="#64806a">${online ? (ready ? "HARDWARE READY" : "DEVICE CONNECTED") : "STATION PREVIEW"}</text>
+
+          <path d="M145 86 C130 75 134 65 150 69 C164 73 162 84 145 86Z"
+            fill="#e9a84c"/>
+          <path d="M145 85 Q148 77 155 73"
+            fill="none" stroke="#fff2d6" stroke-width="1.5"/>
+
+          <g transform="translate(4 172)">
+            <rect x="5" y="0" width="27" height="10" rx="3"
+              fill="#315b3d"/>
+            <rect x="1" y="9" width="35" height="79" rx="10"
+              fill="url(#morniTwinBottle)"
+              stroke="#c77e39" stroke-width="2"/>
+            <rect x="6" y="31" width="25" height="29" rx="5"
+              fill="#fff4dc" opacity=".95"/>
+            <text x="18.5" y="43" text-anchor="middle"
+              font-size="6" font-weight="800" fill="#315b3d">HAND</text>
+            <text x="18.5" y="51" text-anchor="middle"
+              font-size="6" font-weight="800" fill="#315b3d">WASH</text>
+          </g>
+
+          <g transform="translate(261 174) rotate(9)">
+            <rect x="6" y="0" width="13" height="16" rx="4"
+              fill="#315b3d"/>
+            <path d="M5 15 H20 L18 91 Q12 99 7 91Z"
+              fill="#e6a34d" stroke="#bd7b38" stroke-width="1.5"/>
+            <path d="M6 4 H19" stroke="#fff1d1" stroke-width="2"/>
+            <path d="M8 1 V-5 M12 1 V-6 M16 1 V-5"
+              stroke="#fff8e9" stroke-width="2" stroke-linecap="round"/>
+          </g>
+        </svg>
+      </div>
+
+      <div style="
+        position:absolute;
+        left:12px;bottom:12px;
+        padding:6px 9px;
+        border-radius:20px;
+        background:rgba(255,255,255,.78);
+        color:#315b3d;
+        font-size:9px;
+        font-weight:800;
+        letter-spacing:.5px;
+      ">
+        ${online ? "● DEVICE ONLINE" : "○ DIGITAL PREVIEW"}
+      </div>
+
+      <div style="
+        position:absolute;
+        right:12px;bottom:12px;
+        padding:6px 9px;
+        border-radius:20px;
+        background:rgba(255,255,255,.78);
+        color:#315b3d;
+        font-size:9px;
+        font-weight:800;
+      ">
+        ${ready ? "HARDWARE READY" : "PREVIEW"}
+      </div>
+    </div>
+  `;
+}
+
+
+  /* ---------------------------------------------------------
+     HOME PAGE
+     --------------------------------------------------------- */
+
+  function home() {
+    const pct = progress();
+
+    const xpPct = Math.round(
+      (xp.points - (level() - 1) ** 2 * 40) /
+      (level() ** 2 * 40 - (level() - 1) ** 2 * 40) * 100
+    );
+
+    return `<div class="page-enter">
+
+      <section class="welcome-hero">
+        <div class="hero-copy">
+          <div class="eyebrow">
+            <span class="eyebrow-dot"></span>
+            YOUR PERSONAL MORNING SYSTEM
+            <span class="eyebrow-line"></span>
+          </div>
+
+          <h1>${greeting()},<br/><em>${safe(state.profile.name.split(" ")[0] || "friend")}.</em></h1>
+
+          <p>
+            ${dateText()}
+            <span class="hero-separator">·</span>
+            ${safe(coach())}
+          </p>
+
+          <div class="hero-actions">
+            <button class="btn btn-primary" data-action="start-routine">
+              ${state.routine.started ? "Routine in progress" : "Start my morning"}
+              <span>↗</span>
+            </button>
+
+            <button class="btn btn-ghost" data-page="routine">
+              View routine <span>→</span>
+            </button>
+          </div>
+
+          <div class="hero-footnote">
+            <span class="live-pulse"></span>
+            ${state.device.online
+              ? "MORNI station is on your network"
+              : "Your morning companion is ready"}
+          </div>
+        </div>
+
+        <div class="hero-art">
+          <div class="sun-disc">
+            <div class="sun-core"></div>
+            <div class="sun-ray ray-1"></div>
+            <div class="sun-ray ray-2"></div>
+            <div class="sun-ray ray-3"></div>
+            <div class="sun-ray ray-4"></div>
+            <div class="sun-horizon"></div>
+          </div>
+
+          <div class="hero-leaf leaf-a">✦</div>
+          <div class="hero-leaf leaf-b">✧</div>
+
+          <div class="hero-art-label">
+            A FRESH START<br/><b>EVERY DAY</b>
+          </div>
+        </div>
+
+        <div class="hero-grain"></div>
+      </section>
+
+      <div class="metric-strip">
+        <div class="metric">
+          <span class="metric-icon">◉</span>
+          <div>
+            <small>TODAY'S PROGRESS</small>
+            <b>${pct}%</b>
+            <span>${completed()}/2 essentials</span>
+          </div>
+        </div>
+
+        <div class="metric">
+          <span class="metric-icon orange">↗</span>
+          <div>
+            <small>CURRENT STREAK</small>
+            <b>${state.streak} <i>days</i></b>
+            <span>Best: ${state.bestStreak} days</span>
+          </div>
+        </div>
+
+        <div class="metric">
+          <span class="metric-icon violet">✧</span>
+          <div>
+            <small>MORNI POINTS</small>
+            <b>${xp.points}</b>
+            <span>Level ${level()} · ${nextXP()} to next</span>
+          </div>
+        </div>
+
+        <div class="metric">
+          <span class="metric-icon blue">⌁</span>
+          <div>
+            <small>STATION STATUS</small>
+            <b class="metric-status ${state.device.online ? "is-online" : ""}">
+              ${state.device.online ? "Online" : "Offline"}
+            </b>
+            <span>${state.device.hardwareReady
+              ? "Hardware ready"
+              : "Hardware integration pending"}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="morni-home-launch">
+        <div><span class="morni-kicker">THE NEXT MORNING, REIMAGINED</span><b>Explore the MORNI experience</b><small>Guided hygiene, adaptive planning, rewards and a judge-ready product tour.</small></div>
+        <button class="btn btn-primary" data-page="home">Go to Home ↗</button>
+      </div>
+
+      <div class="dashboard-grid">
+        <div class="dashboard-main">
+
+          ${card("Your morning, made simple", `
+            <div class="section-intro">
+              <span>THE ESSENTIALS</span>
+              <b>${completed()}/2 complete</b>
+            </div>
+
+            ${progressBar(pct)}
+
+            <div class="routine-cards">
+              ${steps.map(step => {
+                const done = step.id === "toothbrush"
+                  ? state.routine.brushingComplete
+                  : state.routine.handwash;
+
+                const active =
+                  step.id === "toothbrush" && state.timer.running;
+
+                return `
+                  <button class="routine-tile ${done ? "is-done" : ""} ${active ? "is-active" : ""}"
+                    data-page="routine">
+                    <span class="routine-tile-icon">${step.icon}</span>
+                    <span class="routine-tile-copy">
+                      <b>${step.title}</b>
+                      <small>${done ? "Completed" : active ? "In progress" : "Ready when you are"}</small>
+                    </span>
+                    <span class="routine-tile-state">
+                      ${done ? "✓" : active ? "···" : "↗"}
+                    </span>
+                  </button>
+                `;
+              }).join("")}
+            </div>
+
+            <button class="text-link" data-page="routine">
+              Open my routine <span>→</span>
+            </button>
+          `)}
+
+          ${card("Your morning timeline", miniTimeline())}
+        </div>
+
+        <div class="dashboard-side">
+          ${card("MORNI · digital twin", twin(), "twin-panel")}
+
+          ${card("A little nudge", `
+            <div class="coach-card">
+              <span class="coach-spark">✳</span>
+              <div>
+                <b>Today's thought</b>
+                <p>${safe(coach())}</p>
+              </div>
+            </div>
+
+            <div class="xp-mini">
+              <div>
+                <small>LEVEL ${level()}</small>
+                <b>${xp.points} <i>PTS</i></b>
+              </div>
+              ${progressBar(xpPct)}
+            </div>
+          `)}
+        </div>
+      </div>
+    </div>`;
+  }
+
+  /* ---------------------------------------------------------
+     ROUTINE PAGE
+     --------------------------------------------------------- */
+
+ 
+function routine() {
+  const remaining = state.timer.running
+    ? Math.max(0, Math.ceil((state.timer.endsAt - Date.now()) / 1000))
+    : state.timer.remaining;
+
+  return `<div class="page-enter">
+
+    <div class="page-title-row">
+      <div>
+        <div class="eyebrow">YOUR DAILY FLOW</div>
+        <h1>My routine<span class="title-period">.</span></h1>
+        <p>Two essentials. One better start.</p>
+      </div>
+
+      <span class="date-chip">◷ ${dateText()}</span>
+    </div>
+
+    <div class="routine-layout">
+      <div>
+        ${card("The essentials", `
+          <div class="large-step ${state.routine.brushingComplete ? "complete" : ""}">
+            <div class="large-step-icon">✳</div>
+            <div class="large-step-copy">
+              <span>01 / BRUSHING</span>
+              <h3>Two minutes for you.</h3>
+              <p>Pick up your toothbrush to begin. Your station detects the pickup and starts the timer.</p>
+              <div class="step-state">
+                ${state.routine.brushingComplete
+                  ? "✓ Completed"
+                  : state.timer.running
+                    ? "● Timer running"
+                    : "○ Waiting for toothbrush"}
+              </div>
+            </div>
+          </div>
+
+          <div class="large-step ${state.routine.handwash ? "complete" : ""}">
+            <div class="large-step-icon orange-icon">◌</div>
+            <div class="large-step-copy">
+              <span>02 / HANDWASH</span>
+              <h3>Finish fresh.</h3>
+              <p>Your station detects your hand and dispenses handwash automatically.</p>
+              <div class="step-state">
+                ${state.routine.handwash ? "✓ Completed" : "○ Waiting for handwash event"}
+              </div>
+            </div>
+          </div>
+
+          <div class="routine-footer">
+            <span>${completed()} of 2 essentials complete</span>
+            <b>${progress()}%</b>
+          </div>
+
+          ${progressBar(progress())}
+        `)}
+
+        ${card("School-day checklist", checklistMarkup())}
+      </div>
+
+      <div>
+        ${card("Brushing timer", `
+          <div class="timer-face">
+            <div class="timer-orbit"></div>
+
+            <div class="timer-ring" id="timerProgress"
+              style="--ring:${(120 - remaining) / 120 * 360}deg">
+              <div class="timer-center">
+                <b id="timerDigits">${fmt(remaining)}</b>
+                <small>${state.timer.running ? "BRUSHING" : "TWO-MINUTE TIMER"}</small>
+              </div>
+            </div>
+          </div>
+
+          <div class="timer-message">
+            ${state.timer.running
+              ? "Stay with it. You're doing great."
+              : state.routine.brushingComplete
+                ? "Brushing complete. Great work!"
+                : "Ready when your toothbrush is picked up."}
+          </div>
+
+          <div class="timer-controls">
+            <button class="btn btn-primary" data-action="timer-start"
+              ${state.timer.running || state.routine.brushingComplete ? "disabled" : ""}>
+              ${state.timer.running ? "Running" : "Start timer"}
+            </button>
+
+            <button class="btn btn-soft" data-action="timer-pause"
+              ${!state.timer.running ? "disabled" : ""}>
+              Pause
+            </button>
+
+            <button class="btn btn-soft" data-action="timer-reset">
+              Reset
+            </button>
+          </div>
+
+          <div class="timer-note">
+            ${isDemoMode()
+              ? "Demo timer · hardware pickup will start this automatically when connected"
+              : "Live mode · timer commands sync only when firmware reports hardware readiness"}
+          </div>
+        `)}
+
+        ${card("Routine status", `
+          <div class="status-line">
+            <span>Routine activation</span>
+            <b>${state.routine.started ? "Started" : "Not started"}</b>
+          </div>
+
+          <div class="status-line">
+            <span>Toothbrush holder</span>
+            <b>${state.routine.toothbrush ? "Picked up" : "In holder / unknown"}</b>
+          </div>
+
+          <div class="status-line">
+            <span>Handwash station</span>
+            <b>${state.routine.handwash ? "Used" : "Awaiting event"}</b>
+          </div>
+        `)}
+
+        ${isDemoMode() ? card("Demo controls", `
+          <p class="body-copy">
+            Preview the complete morning routine without physical hardware.
+            These controls only simulate events in the app.
+          </p>
+
+          <div class="timer-controls">
+            <button class="btn btn-primary" data-action="demo-start">
+              ▶ Simulate START
+            </button>
+
+            <button class="btn btn-soft" data-action="demo-brush">
+              ✳ Simulate toothbrush pickup
+            </button>
+
+            <button class="btn btn-soft" data-action="demo-complete-brush">
+              ✓ Complete brushing
+            </button>
+
+            <button class="btn btn-soft" data-action="demo-handwash">
+              ◌ Simulate handwash
+            </button>
+          </div>
+        `) : ""}
+      </div>
+    </div>
+  </div>`;
+}
+
+  function checklistMarkup() {
+    const items = [
+      ["uniform", "Uniform ready", "A quick outfit check"],
+      ["bag", "School bag packed", "Books, notes and essentials"],
+      ["bottle", "Water bottle filled", "Keep hydration close"],
+      ["homework", "Homework checked", "Everything ready to go"]
+    ];
+
+    return `<div class="checklist">
+      ${items.map(([id, title, detail]) => `
+        <label class="check-item">
+          <input type="checkbox" data-check="${id}"
+            ${state.checklist[id] ? "checked" : ""}/>
+          <span class="check-custom">✓</span>
+          <span>
+            <b>${title}</b>
+            <small>${detail}</small>
+          </span>
+        </label>
+      `).join("")}
+    </div>`;
+  }
+
+  /* ---------------------------------------------------------
+     DEVICE PAGE
+     --------------------------------------------------------- */
+
+  function device() {
+    return `<div class="page-enter">
+
+      <div class="page-title-row">
+        <div>
+          <div class="eyebrow">THE CONNECTED STATION</div>
+          <h1>Device studio<span class="title-period">.</span></h1>
+          <p>One connected experience, from station to screen.</p>
+        </div>
+
+        <button class="btn btn-soft" data-action="check-device">
+          ↻ Check connection
+        </button>
+      </div>
+
+      <div class="device-hero-grid">
+
+        ${card("Connection overview", `
+          <div class="connection-visual">
+            <span class="connection-icon ${state.device.online ? "online" : ""}">⌁</span>
+
+            <div>
+              <b>${state.device.online ? "ESP8266 connected" : isDemoMode() ? "Demo mode active" : "Station offline"}</b>
+              <small>${safe(state.device.ip)}</small>
+            </div>
+
+            <span class="connection-badge ${state.device.online ? "ok" : "bad"}">
+              ${state.device.online ? "ONLINE" : isDemoMode() ? "DEMO" : "OFFLINE"}
+            </span>
+          </div>
+
+          <div class="status-line">
+            <span>Last response</span>
+            <b>${state.device.lastSeen ? time(state.device.lastSeen) : "Not yet checked"}</b>
+          </div>
+
+          <div class="status-line">
+            <span>Firmware-reported hardware</span>
+            <b>${state.device.hardwareReady ? "Ready" : "Integration pending"}</b>
+          </div>
+
+          <div class="status-line">
+            <span>Operating mode</span>
+            <b>${safe(state.device.mode)}</b>
+          </div>
+
+          ${state.device.lastError
+            ? `<p class="error-note">${safe(state.device.lastError)}</p>`
+            : ""}
+        `)}
+
+        ${card("Digital twin", twin(), "twin-panel")}
+      </div>
+
+      <div class="dashboard-grid device-lower">
+        <div>
+          ${card("Station components", `
+            <div class="component-row">
+              <span class="component-glyph">⌁</span>
+              <div>
+                <b>Handwash detection + dual-servo pump</b>
+                <small>Ultrasonic sensing and coordinated dispensing</small>
+              </div>
+              <em class="pending-pill">Awaiting hardware</em>
+            </div>
+
+            <div class="component-row">
+              <span class="component-glyph">✳</span>
+              <div>
+                <b>Toothbrush holder IR sensor</b>
+                <small>Detects toothbrush pickup and return</small>
+              </div>
+              <em class="pending-pill">Awaiting hardware</em>
+            </div>
+
+            <div class="component-row">
+              <span class="component-glyph">◉</span>
+              <div>
+                <b>START touch sensor</b>
+                <small>Wakes MORNI and activates the routine</small>
+              </div>
+              <em class="pending-pill">Awaiting hardware</em>
+            </div>
+
+            <div class="component-row">
+              <span class="component-glyph">▤</span>
+              <div>
+                <b>LCD + battery-backed RTC</b>
+                <small>Clock, countdown and routine messages</small>
+              </div>
+              <em class="pending-pill">Awaiting hardware</em>
+            </div>
+          `)}
+
+          ${card("Hardware integration notes", `
+            <p class="body-copy">
+              An online ESP8266 confirms that its web server is reachable.
+              It does not prove that sensors, the LCD or servos are connected.
+            </p>
+
+            <div class="notice-box">
+              <span>ⓘ</span>
+              <p>
+                The physical commands remain locked until the firmware reports
+                <b>hardwareConnected: true</b> or <b>hardwareReady: true</b>.
+              </p>
+            </div>
+          `)}
+        </div>
+
+        <div>
+          ${card("Safe command preview", `
+            <p class="body-copy">
+              ${state.device.hardwareReady
+                ? "Firmware reports hardware readiness. Only configured commands can be sent."
+                : "These controls are locked until the station reports hardware readiness."}
+            </p>
+
+            <button class="command-row" disabled>
+              <span>🧼</span>
+              <b>Test handwash pump</b>
+              <small>Locked pending verified dispenser integration</small>
+            </button>
+
+            <button class="command-row" disabled>
+              <span>✳</span>
+              <b>Test toothbrush detection</b>
+              <small>Sensor status is read from firmware events</small>
+            </button>
+
+            <button class="command-row" disabled>
+              <span>◉</span>
+              <b>Activate START routine</b>
+              <small>Physical touch sensor</small>
+            </button>
+          `)}
+
+          ${isDemoMode() ? card("Demo controls", `
+            <p class="body-copy">
+              These simulate app events only. They do not control physical hardware.
+            </p>
+
+            <button class="btn btn-soft" data-action="demo-start">
+              Simulate START
+            </button>
+
+            <button class="btn btn-soft" data-action="demo-brush">
+              Simulate toothbrush pickup
+            </button>
+
+            <button class="btn btn-soft" data-action="demo-handwash">
+              Simulate handwash
+            </button>
+
+            <button class="btn btn-soft" data-action="demo-complete-brush">
+              Complete brushing
+            </button>
+          `) : ""}
+        </div>
+      </div>
+    </div>`;
+  }
+
+  /* ---------------------------------------------------------
+     SCHOOL PAGE
+     --------------------------------------------------------- */
+
+  function school() {
+    const items = [
+      ["uniform", "Uniform ready", "A quick outfit check"],
+      ["bag", "School bag packed", "Books, notes and essentials"],
+      ["bottle", "Water bottle filled", "Keep hydration close"],
+      ["homework", "Homework checked", "Everything ready to go"]
+    ];
+
+    const count = Object.values(state.checklist).filter(Boolean).length;
+
+    return `<div class="page-enter">
+
+      <div class="page-title-row">
+        <div>
+          <div class="eyebrow">BEYOND THE BATHROOM</div>
+          <h1>School prep<span class="title-period">.</span></h1>
+          <p>Leave the house feeling ready, not rushed.</p>
+        </div>
+
+        <div class="date-chip">${count}/4 READY</div>
+      </div>
+
+      <div class="school-layout">
+        ${card("Your departure checklist", `
+          <div class="school-progress">
+            <b>${Math.round(count / 4 * 100)}%</b>
+            <span>ready to go</span>
+            ${progressBar(count / 4 * 100)}
+          </div>
+
+          <div class="checklist">
+            ${items.map(([id, title, detail]) => `
+              <label class="check-item">
+                <input type="checkbox" data-check="${id}"
+                  ${state.checklist[id] ? "checked" : ""}/>
+                <span class="check-custom">✓</span>
+                <span>
+                  <b>${title}</b>
+                  <small>${detail}</small>
+                </span>
+              </label>
+            `).join("")}
+          </div>
+        `)}
+
+        ${card("A calmer exit", `
+          <div class="exit-card">
+            <span>✧</span>
+            <h3>Give yourself a 5-minute buffer.</h3>
+            <p>
+              Pack the essentials before you start getting ready.
+              A little preparation makes the morning feel lighter.
+            </p>
+          </div>
+        `)}
+      </div>
+    </div>`;
+  }
+
+  /* ---------------------------------------------------------
+     INSIGHTS, MISSIONS AND ACHIEVEMENTS
+     --------------------------------------------------------- */
+
+  function missionPanel() {
+    return `<div class="mission-grid">
+      ${missions.map(mission => {
+        const done = mission.test();
+
+        return `
+          <div class="mission-card ${done ? "mission-done" : ""}">
+            <div class="mission-icon">${done ? "✓" : "✧"}</div>
+            <div class="mission-copy">
+              <b>${mission.title}</b>
+              <small>${mission.desc}</small>
+            </div>
+            <span class="mission-reward">${done ? "DONE" : "+5 XP"}</span>
+          </div>
+        `;
+      }).join("")}
+    </div>`;
+  }
+
+  function insights() {
+    const fullDays = state.history.length;
+
+    const days = Array.from({ length: 7 }, (_, index) => {
+      const date = new Date();
+      date.setDate(date.getDate() - 6 + index);
+
+      const key =
+        `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+
+      return {
+        label: date.toLocaleDateString([], { weekday: "short" }),
+        done: state.history.some(item => item.date === key)
+      };
+    });
+
+    const calendar = Array.from({ length: 28 }, (_, index) => {
+      const date = new Date();
+      date.setDate(date.getDate() - 27 + index);
+
+      const key =
+        `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+
+      return {
+        label: date.getDate(),
+        done: state.history.some(item => item.date === key)
+      };
+    });
+
+    const xpPct = Math.max(0, Math.min(100,
+      Math.round(
+        (xp.points - (level() - 1) ** 2 * 40) /
+        (level() ** 2 * 40 - (level() - 1) ** 2 * 40) * 100
+      )
+    ));
+
+    const earned = achievements.filter(item =>
+      xp.unlocked.includes(item[0])
+    ).length;
+
+    return `<div class="page-enter">
+
+      <div class="page-title-row">
+        <div>
+          <div class="eyebrow">YOUR MORNI JOURNEY</div>
+          <h1>Your insights<span class="title-period">.</span></h1>
+          <p>Every small action is part of something bigger.</p>
+        </div>
+
+        <span class="date-chip">LEVEL ${level()} · ${xp.points} XP</span>
+      </div>
+
+      <div class="level-showcase panel">
+        <div class="level-orb">
+          <span>${level()}</span>
+          <small>LEVEL</small>
+        </div>
+
+        <div class="level-info">
+          <div class="level-heading">
+            <b>Your MORNI journey</b>
+            <span>${nextXP()} XP to next level</span>
+          </div>
+
+          ${progressBar(xpPct)}
+          <small>${xp.points} total MORNI points earned</small>
+        </div>
+      </div>
+
+      <div class="insight-metrics">
+        ${card("Completed mornings", `
+          <b class="insight-number">${fullDays}</b>
+          <small>Your recorded full routines</small>
+        `)}
+
+        ${card("Current streak", `
+          <b class="insight-number">${state.streak}<i> days</i></b>
+          <small>Personal best: ${state.bestStreak} days</small>
+        `)}
+
+        ${card("Achievements", `
+          <b class="insight-number">${earned}<i> / ${achievements.length}</i></b>
+          <small>Milestones unlocked</small>
+        `)}
+      </div>
+
+      <div class="insight-layout">
+        ${card("Your last seven days", `
+          <div class="week-chart">
+            ${days.map(day => `
+              <div class="week-day">
+                <div class="week-bar ${day.done ? "done" : ""}">
+                  <span>${day.done ? "✓" : "·"}</span>
+                </div>
+                <small>${day.label}</small>
+              </div>
+            `).join("")}
+          </div>
+
+          <p class="chart-caption">
+            Completed mornings are highlighted.
+          </p>
+        `)}
+
+        ${card("Your activity calendar", `
+          <p class="body-copy">
+            Your last 28 days of recorded routine activity.
+          </p>
+
+          <div class="activity-calendar">
+            ${calendar.map(day => `
+              <div class="calendar-day ${day.done ? "calendar-done" : ""}"
+                title="${day.label}${day.done ? " · Completed" : " · No completed routine"}">
+                ${day.label}
+              </div>
+            `).join("")}
+          </div>
+
+          <div class="calendar-legend">
+            <span></span> Completed morning
+            <span class="legend-empty"></span> Not completed
+          </div>
+        `)}
+      </div>
+
+      ${card("Today's missions", missionPanel())}
+
+      ${card("Achievement collection", `
+        <div class="achievement-summary">
+          <b>${earned} achievements unlocked</b>
+          <span>${achievements.length - earned} still waiting</span>
+        </div>
+
+        ${progressBar(earned / achievements.length * 100)}
+
+        <div class="achievement-grid">
+          ${achievements.map(item => {
+            const unlocked = xp.unlocked.includes(item[0]);
+
+            return `
+              <div class="achievement ${unlocked ? "earned" : "locked"}">
+                <span>${unlocked ? "✧" : "◇"}</span>
+                <div>
+                  <b>${item[1]}</b>
+                  <small>${item[2]}</small>
+                  <small>${unlocked ? "UNLOCKED" : "NOT YET UNLOCKED"}</small>
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      `)}
+
+      ${card("Recent activity", miniTimeline())}
+    </div>`;
+  }
+
+  /* ---------------------------------------------------------
+     SETTINGS PAGE
+     --------------------------------------------------------- */
+
+  function settings() {
+    const demo = isDemoMode();
+
+    return `<div class="page-enter">
+
+      <div class="page-title-row">
+        <div>
+          <div class="eyebrow">MAKE MORNI YOURS</div>
+          <h1>Settings<span class="title-period">.</span></h1>
+          <p>Your preferences stay on this browser.</p>
+        </div>
+      </div>
+
+      <div class="settings-layout">
+
+        ${card("Device connection", `
+          <p class="body-copy">
+            Choose how MORNI connects to your physical station.
+          </p>
+
+          <label class="field-label">
+            Connection mode
+            <select class="field-input" id="connectionMode">
+              <option value="demo" ${demo ? "selected" : ""}>Demo mode</option>
+              <option value="live" ${!demo ? "selected" : ""}>Live hardware</option>
+            </select>
+          </label>
+
+          <label class="field-label">
+            ESP8266 address
+            <input class="field-input" id="deviceAddress"
+              type="text"
+              value="${safe(deviceBaseUrl)}"
+              placeholder="http://192.168.0.196">
+          </label>
+
+          <p class="body-copy">
+            Your ESP8266 and browser device need a compatible network.
+            Hardware commands remain locked until the station reports readiness.
+          </p>
+
+          <button class="btn btn-primary" data-action="save-connection">
+            Save connection settings
+          </button>
+
+          <div class="refill-result">
+            <b>${demo ? "DEMO MODE" : "LIVE MODE"}</b>
+            <small>${demo
+              ? "Physical hardware is not contacted"
+              : "Live connection selected"}</small>
+          </div>
+        `)}
+
+        ${card("Personal profile", `
+          <label class="field-label">
+            Display name
+            <input class="field-input" id="profileName"
+              maxlength="32"
+              value="${safe(state.profile.name)}">
+          </label>
+
+          <label class="field-label">
+            Usual wake-up time
+            <input class="field-input" id="wakeTime"
+              type="time"
+              value="${safe(state.profile.wakeTime)}">
+          </label>
+
+          <button class="btn btn-primary" data-action="save-profile">
+            Save preferences
+          </button>
+        `)}
+
+        ${card("Handwash refill estimate", `
+          <p class="body-copy">
+            Estimates only — MORNI does not measure liquid level unless
+            a separate level sensor is added.
+          </p>
+
+          <label class="field-label">
+            Bottle capacity (ml)
+            <input class="field-input" id="capacity"
+              type="number" min="1"
+              value="${state.capacity.handwash}">
+          </label>
+
+          <label class="field-label">
+            Estimated amount per use (ml)
+            <input class="field-input" id="average"
+              type="number" min="0.1" step="0.1"
+              value="${state.average.handwash}">
+          </label>
+
+          <button class="btn btn-primary" data-action="save-refill">
+            Save estimate
+          </button>
+
+          <div class="refill-result">
+            <b>${Math.max(0, Math.round(state.capacity.handwash - state.used.handwash))} ml</b>
+            <small>estimated remaining</small>
+          </div>
+        `)}
+
+        ${card("Appearance", `
+          <div class="setting-row">
+            <div>
+              <b>Interface theme</b>
+              <small>Choose a comfortable display.</small>
+            </div>
+
+            <button class="btn btn-soft" data-action="theme">
+              ${state.theme === "dark" ? "Switch to light" : "Switch to dark"}
+            </button>
+          </div>
+        `)}
+
+        ${card("Data & privacy", `
+          <p class="body-copy">
+            Routine history, preferences and points are stored locally
+            in this browser. They are not synced to an account.
+          </p>
+
+          <button class="btn btn-danger" data-action="reset">
+            Reset local MORNI data
+          </button>
+        `)}
+      </div>
+    </div>`;
+  }
+
+  /* =========================================================
+     MORNI ULTIMATE EXPERIENCE LAYER
+     A complete software-first morning companion. All simulated
+     interactions are labelled and never impersonate hardware.
+     ========================================================= */
+
+  const EXTRA_STORE = "morni_ultimate_experience_v1";
+  const extraDefaults = () => ({
+    handwash: {
+      running: false,
+      remaining: 30,
+      endsAt: 0,
+      stageIndex: 0,
+      sessions: [],
+      lastCompletedDate: ""
+    },
+    water: { count: 0, target: 6, date: today(), awardedDate: "" },
+    plan: {
+      wake: state.profile.wakeTime || "06:30",
+      leave: "07:30",
+      buffer: 10,
+      tasks: [
+        { id: "wake", title: "Wake up and get ready", minutes: 5, done: false },
+        { id: "hygiene", title: "Complete hygiene routine", minutes: 10, done: false },
+        { id: "dress", title: "Get dressed", minutes: 10, done: false },
+        { id: "breakfast", title: "Have breakfast", minutes: 15, done: false },
+        { id: "pack", title: "Final bag and bottle check", minutes: 5, done: false }
+      ]
+    },
+    rewards: {
+      owned: ["sunrise"],
+      equipped: "sunrise",
+      transactions: []
+    },
+    reflection: { date: today(), energy: "steady", note: "" },
+    resource: { mlPerPump: Number(CFG.refill?.handwashPerUse || 2), refillReminder: 20 },
+    showcase: { step: 0, completed: [] },
+    focus: { running: false, remaining: 300, endsAt: 0, sessions: 0 }
+  });
+
+  let extra = Object.assign(extraDefaults(), read(EXTRA_STORE, {}));
+  const extraFresh = extraDefaults();
+  for (const key of Object.keys(extraFresh)) {
+    extra[key] = Object.assign({}, extraFresh[key], extra[key] || {});
+  }
+  for (const key of ["sessions"]) {
+    if (!Array.isArray(extra.handwash[key])) extra.handwash[key] = [];
+  }
+  if (!Array.isArray(extra.plan.tasks)) extra.plan.tasks = extraFresh.plan.tasks;
+  if (!Array.isArray(extra.rewards.owned)) extra.rewards.owned = ["sunrise"];
+  if (!Array.isArray(extra.rewards.transactions)) extra.rewards.transactions = [];
+  if (!Array.isArray(extra.showcase.completed)) extra.showcase.completed = [];
+  if (extra.water.date !== today()) {
+    extra.water.count = 0;
+    extra.water.date = today();
+  }
+  if (extra.reflection.date !== today()) {
+    extra.reflection = { date: today(), energy: "steady", note: "" };
+  }
+  if (!Number.isFinite(Number(extra.resource.mlPerPump)) || Number(extra.resource.mlPerPump) <= 0) {
+    extra.resource.mlPerPump = Number(CFG.refill?.handwashPerUse || 2);
+  }
+
+  if (!Number.isFinite(extra.handwash.remaining) || extra.handwash.remaining < 0 || extra.handwash.remaining > 30) extra.handwash.remaining = 30;
+  if (!Number.isFinite(extra.water.count) || extra.water.count < 0) extra.water.count = 0;
+  if (!Number.isFinite(extra.water.target) || extra.water.target < 1) extra.water.target = 6;
+  if (!extra.rewards.owned.includes("sunrise")) extra.rewards.owned.unshift("sunrise");
+  if (!extra.rewards.owned.includes(extra.rewards.equipped)) extra.rewards.equipped = "sunrise";
+  saveExtra();
+
+  let handwashLoop = null;
+  let focusLoop = null;
+  let featureToastLoop = null;
+
+  function saveExtra() {
+    write(EXTRA_STORE, extra);
+  }
+
+  const handwashStages = [
+    { title: "Wet your hands", detail: "Use clean running water to wet both hands.", icon: "💧", seconds: 5 },
+    { title: "Apply soap", detail: "Use enough soap to cover both hands.", icon: "🫧", seconds: 5 },
+    { title: "Palm to palm", detail: "Rub your palms together to build a lather.", icon: "🤲", seconds: 5 },
+    { title: "Between fingers", detail: "Clean the backs of your hands and between every finger.", icon: "✋", seconds: 5 },
+    { title: "Thumbs and fingertips", detail: "Give thumbs, fingertips and nail areas attention.", icon: "✨", seconds: 5 },
+    { title: "Rinse and dry", detail: "Rinse thoroughly and dry with a clean towel.", icon: "🌿", seconds: 5 }
+  ];
+
+  const rewardCatalog = [
+    { id: "sunrise", name: "First Light", category: "Starter", cost: 0, icon: "🌅", description: "Your original MORNI sunrise identity." },
+    { id: "leaf", name: "Eco Explorer", category: "Badge", cost: 45, icon: "🍃", description: "A little reminder to make thoughtful choices." },
+    { id: "orbit", name: "Orbit Trail", category: "Theme", cost: 70, icon: "🪐", description: "A space-inspired profile collectible." },
+    { id: "spark", name: "Bright Spark", category: "Badge", cost: 90, icon: "✨", description: "Celebrate the small wins that add up." },
+    { id: "citrus", name: "Citrus Glow", category: "Theme", cost: 110, icon: "🍊", description: "A warm, energetic morning collectible." },
+    { id: "cloud", name: "Cloud Nine", category: "Theme", cost: 140, icon: "☁️", description: "A calm, airy look for your collection." },
+    { id: "comet", name: "Comet Club", category: "Badge", cost: 180, icon: "☄️", description: "A milestone collectible for consistent mornings." },
+    { id: "forest", name: "Forest Keeper", category: "Theme", cost: 220, icon: "🌳", description: "A nature-inspired collection piece." },
+    { id: "golden", name: "Golden Hour", category: "Prestige", cost: 300, icon: "🏆", description: "A premium milestone for your MORNI profile." },
+    { id: "galaxy", name: "Galaxy Garden", category: "Prestige", cost: 420, icon: "🌌", description: "A special collectible for long-term progress." }
+  ];
+
+  const showcaseSteps = [
+    { title: "A morning, understood", page: "lab", description: "MORNI brings hygiene, school preparation, planning and progress into one calm command centre.", proof: "A unified daily experience rather than a collection of disconnected timers." },
+    { title: "Guidance that works without sensors", page: "handwash", description: "A timed, step-by-step handwashing guide makes the software useful even before the physical station is ready.", proof: "The guide is interactive and clearly labelled as app-guided, not sensor-verified." },
+    { title: "A plan that respects real time", page: "planner", description: "The planner estimates the available morning window and helps organise tasks around a chosen departure time.", proof: "Time estimates are visible and editable by the user." },
+    { title: "Progress with a purpose", page: "rewards", description: "Points can be spent on cosmetic collectibles, giving achievements a visible use.", proof: "Purchases are local, persistent and cannot create a negative balance." },
+    { title: "A transparent readiness picture", page: "impact", description: "The MORNI Readiness Index combines routine, school preparation, planning and recent consistency.", proof: "Its formula is disclosed and it is not presented as a medical or scientific score." },
+    { title: "Hardware-ready by design", page: "device", description: "The digital twin and demo flow are available now; physical commands remain locked until firmware confirms hardware readiness.", proof: "A reachable ESP8266 is not misrepresented as fully assembled hardware." }
+  ];
+
+  function featureNav() {
+    const links = [
+      ["home", "⌂", "Home"],
+      ["lab", "⌘", "Command centre"],
+      ["handwash", "◌", "Handwash lab"],
+      ["planner", "◷", "Morning planner"],
+      ["rewards", "✧", "Rewards shop"],
+      ["impact", "◎", "Readiness lab"],
+      ["showcase", "▶", "Judge tour"],
+      ["focus", "◉", "Focus space"]
+    ];
+    return `<nav class="morni-feature-nav" aria-label="MORNI experience">
+      <span class="morni-nav-label">EXPLORE MORNI</span>
+      ${links.map(([id, icon, label]) => `<button type="button" data-page="${id}" class="${page === id ? "active" : ""}"><span>${icon}</span>${label}</button>`).join("")}
+      <button type="button" class="morni-profile-button ${page === "profile" ? "active" : ""}" data-page="profile" aria-label="Open profile"><span class="morni-profile-avatar">${safe((state.profile.name || "M").trim().charAt(0).toUpperCase())}</span><span class="morni-profile-label">Profile</span></button>
+    </nav>`;
+  }
+
+  function featureCard(title, text, icon, pageId, meta = "OPEN EXPERIENCE") {
+    return `<button type="button" class="feature-card" data-page="${pageId}">
+      <span class="feature-card-icon">${icon}</span>
+      <span class="feature-card-copy"><b>${title}</b><small>${text}</small><em>${meta} ↗</em></span>
+    </button>`;
+  }
+
+  function handwashElapsed() {
+    return extra.handwash.running
+      ? Math.max(0, Math.ceil((extra.handwash.endsAt - Date.now()) / 1000))
+      : Math.max(0, extra.handwash.remaining);
+  }
+
+  function handwashStageForRemaining(remaining) {
+    const elapsed = Math.max(0, 30 - remaining);
+    return Math.min(handwashStages.length - 1, Math.floor(elapsed / 5));
+  }
+
+  function startHandwashGuide() {
+    if (extra.handwash.running) return;
+    if (extra.handwash.remaining <= 0) extra.handwash.remaining = 30;
+    extra.handwash.running = true;
+    extra.handwash.endsAt = Date.now() + extra.handwash.remaining * 1000;
+    extra.handwash.stageIndex = handwashStageForRemaining(extra.handwash.remaining);
+    saveExtra();
+    clearInterval(handwashLoop);
+    handwashLoop = setInterval(tickHandwashGuide, 200);
+    render();
+    featureToast("Guided handwash started · app timer only");
+  }
+
+  function pauseHandwashGuide() {
+    if (!extra.handwash.running) return;
+    extra.handwash.remaining = handwashElapsed();
+    extra.handwash.running = false;
+    extra.handwash.endsAt = 0;
+    clearInterval(handwashLoop);
+    saveExtra();
+    render();
+    featureToast("Handwash guide paused");
+  }
+
+  function resetHandwashGuide() {
+    clearInterval(handwashLoop);
+    extra.handwash.running = false;
+    extra.handwash.remaining = 30;
+    extra.handwash.endsAt = 0;
+    extra.handwash.stageIndex = 0;
+    saveExtra();
+    render();
+    featureToast("Handwash guide reset");
+  }
+
+  function tickHandwashGuide() {
+    const remaining = handwashElapsed();
+    extra.handwash.remaining = remaining;
+    extra.handwash.stageIndex = handwashStageForRemaining(remaining);
+    const digits = $("#handwashDigits");
+    const stageTitle = $("#handwashStageTitle");
+    const stageDetail = $("#handwashStageDetail");
+    const stageIcon = $("#handwashStageIcon");
+    const ring = $("#handwashRing");
+    const progress = $("#handwashProgressText");
+    if (digits) digits.textContent = fmt(remaining);
+    if (stageTitle) stageTitle.textContent = handwashStages[extra.handwash.stageIndex].title;
+    if (stageDetail) stageDetail.textContent = handwashStages[extra.handwash.stageIndex].detail;
+    if (stageIcon) stageIcon.textContent = handwashStages[extra.handwash.stageIndex].icon;
+    if (ring) ring.style.setProperty("--ring", `${(30 - remaining) / 30 * 360}deg`);
+    if (progress) progress.textContent = `${Math.min(100, Math.round((30 - remaining) / 30 * 100))}% complete`;
+    if (remaining <= 0) completeHandwashGuide();
+  }
+
+  function completeHandwashGuide() {
+    if (!extra.handwash.running && extra.handwash.remaining <= 0 && extra.handwash.lastCompletedDate === today()) return;
+    clearInterval(handwashLoop);
+    extra.handwash.running = false;
+    extra.handwash.remaining = 0;
+    extra.handwash.endsAt = 0;
+    extra.handwash.stageIndex = handwashStages.length - 1;
+    extra.handwash.lastCompletedDate = today();
+    extra.handwash.sessions.unshift({ date: today(), time: new Date().toISOString(), duration: 30, source: "guided-app" });
+    extra.handwash.sessions = extra.handwash.sessions.slice(0, 100);
+    saveExtra();
+    if (!state.routine.handwash) markHandwash("guided app timer");
+    else award("handwash-guide-extra", 3, "Guided wash completed");
+    featureToast("30-second guide complete · remember to rinse and dry");
+    render();
+  }
+
+  function featureToast(message) {
+    let element = $("#toast");
+    if (!element) {
+      element = document.createElement("div");
+      element.id = "toast";
+      element.className = "toast";
+      document.body.append(element);
+    }
+    element.textContent = message;
+    element.classList.add("show");
+    clearTimeout(featureToastLoop);
+    featureToastLoop = setTimeout(() => element.classList.remove("show"), 3000);
+  }
+
+  function addWaterGlass() {
+    if (extra.water.count >= 20) {
+      featureToast("Today's tracker is capped at 20 entries.");
+      return;
+    }
+    extra.water.count += 1;
+    saveExtra();
+    if (extra.water.count >= Number(extra.water.target || 6) && extra.water.awardedDate !== today()) {
+      extra.water.awardedDate = today();
+      award("water-target", 5, "Personal hydration target reached");
+    }
+    render();
+  }
+
+  function removeWaterGlass() {
+    extra.water.count = Math.max(0, extra.water.count - 1);
+    saveExtra();
+    render();
+  }
+
+  function saveWaterTarget() {
+    const value = Number($("#waterTarget")?.value);
+    if (!Number.isInteger(value) || value < 1 || value > 20) {
+      featureToast("Choose a target between 1 and 20 tracker entries.");
+      return;
+    }
+    extra.water.target = value;
+    saveExtra();
+    render();
+    featureToast("Personal tracker target saved.");
+  }
+
+  function parseClock(value) {
+    const match = /^(\d{2}):(\d{2})$/.exec(String(value || ""));
+    if (!match) return null;
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    if (hours > 23 || minutes > 59) return null;
+    return hours * 60 + minutes;
+  }
+
+  function clockLabel(total) {
+    const wrapped = ((total % 1440) + 1440) % 1440;
+    return `${String(Math.floor(wrapped / 60)).padStart(2, "0")}:${String(wrapped % 60).padStart(2, "0")}`;
+  }
+
+  function plannerSummary() {
+    const wake = parseClock(extra.plan.wake);
+    const leave = parseClock(extra.plan.leave);
+    if (wake === null || leave === null) return { available: 0, needed: 0, gap: 0, valid: false };
+    const available = (leave - wake + 1440) % 1440;
+    const needed = extra.plan.tasks.reduce((sum, task) => sum + Math.max(0, Number(task.minutes) || 0), 0) + Math.max(0, Number(extra.plan.buffer) || 0);
+    return { available, needed, gap: available - needed, valid: available > 0 };
+  }
+
+  function saveMorningPlan() {
+    const wake = $("#planWake")?.value;
+    const leave = $("#planLeave")?.value;
+    const buffer = Number($("#planBuffer")?.value);
+    const start = parseClock(wake);
+    const end = parseClock(leave);
+    if (start === null || end === null || start === end) {
+      featureToast("Enter a valid wake-up and departure time.");
+      return;
+    }
+    if (!Number.isFinite(buffer) || buffer < 0 || buffer > 90) {
+      featureToast("Buffer must be between 0 and 90 minutes.");
+      return;
+    }
+    extra.plan.wake = wake;
+    extra.plan.leave = leave;
+    extra.plan.buffer = buffer;
+    state.profile.wakeTime = wake;
+    saveExtra();
+    save();
+    render();
+    featureToast("Your morning plan has been updated.");
+  }
+
+  function togglePlanTask(id) {
+    const task = extra.plan.tasks.find(item => item.id === id);
+    if (!task) return;
+    task.done = !task.done;
+    saveExtra();
+    render();
+  }
+
+  function addPlanTask() {
+    const title = String($("#newTaskTitle")?.value || "").trim();
+    const minutes = Number($("#newTaskMinutes")?.value || 5);
+    if (!title || title.length > 60) {
+      featureToast("Give your task a name of up to 60 characters.");
+      return;
+    }
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 180) {
+      featureToast("Task duration must be 1–180 minutes.");
+      return;
+    }
+    extra.plan.tasks.push({ id: `custom-${Date.now()}`, title, minutes, done: false });
+    saveExtra();
+    render();
+    featureToast("Task added to your morning plan.");
+  }
+
+  function removePlanTask(id) {
+    if (extra.plan.tasks.length <= 1) {
+      featureToast("Keep at least one task in your plan.");
+      return;
+    }
+    extra.plan.tasks = extra.plan.tasks.filter(task => task.id !== id);
+    saveExtra();
+    render();
+  }
+
+  function buyReward(id) {
+    const item = rewardCatalog.find(reward => reward.id === id);
+    if (!item) return;
+    if (extra.rewards.owned.includes(id)) {
+      featureToast("You already own this collectible.");
+      return;
+    }
+    if (xp.points < item.cost) {
+      featureToast(`You need ${item.cost - xp.points} more points for this item.`);
+      return;
+    }
+    if (!confirm(`Unlock ${item.name} for ${item.cost} MORNI points?`)) return;
+    xp.points -= item.cost;
+    extra.rewards.owned.push(id);
+    extra.rewards.transactions.unshift({ id, name: item.name, cost: item.cost, date: new Date().toISOString() });
+    extra.rewards.transactions = extra.rewards.transactions.slice(0, 50);
+    save();
+    saveExtra();
+    render();
+    featureToast(`${item.name} unlocked. Equip it from your collection.`);
+  }
+
+  function equipReward(id) {
+    if (!extra.rewards.owned.includes(id)) return;
+    extra.rewards.equipped = id;
+    saveExtra();
+    render();
+    featureToast("Profile collectible equipped.");
+  }
+
+  function readinessBreakdown() {
+    const hygiene = Math.round(completed() / 2 * 100);
+    const school = Math.round(Object.values(state.checklist).filter(Boolean).length / Object.keys(state.checklist).length * 100);
+    const plan = Math.round(extra.plan.tasks.filter(task => task.done).length / Math.max(1, extra.plan.tasks.length) * 100);
+    const lastSeven = Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      return state.history.some(item => item.date === key);
+    });
+    const consistency = Math.round(lastSeven.filter(Boolean).length / 7 * 100);
+    const score = Math.round((hygiene + school + plan + consistency) / 4);
+    return { hygiene, school, plan, consistency, score };
+  }
+
+  function adaptiveNudge() {
+    if (!state.routine.brushingComplete) return { title: "Start with the essentials", text: "Your two-minute brushing session is still open. Start it when you're ready.", page: "routine" };
+    if (!state.routine.handwash) return { title: "Finish with clean hands", text: "Use the guided handwash timer to complete the second hygiene step.", page: "handwash" };
+    const unfinished = extra.plan.tasks.find(task => !task.done);
+    if (unfinished) return { title: "One school-prep task left to tackle", text: `Next up: ${unfinished.title}.`, page: "planner" };
+    if (!Object.values(state.checklist).every(Boolean)) return { title: "Do a final school check", text: "Your school checklist can catch the little things before you leave.", page: "school" };
+    return { title: "Your essentials are in a good place", text: "Take a look at your weekly pattern and choose one small improvement for tomorrow.", page: "impact" };
+  }
+
+  function lab() {
+    const score = readinessBreakdown();
+    const nudge = adaptiveNudge();
+    const waterPct = Math.min(100, Math.round(extra.water.count / Math.max(1, extra.water.target) * 100));
+    const reward = rewardCatalog.find(item => item.id === extra.rewards.equipped) || rewardCatalog[0];
+    return `<div class="page-enter morni-lab-page">
+      <section class="morni-command-hero">
+        <div class="morni-command-copy">
+          <span class="morni-kicker">MORNI · MORNING OPERATING SYSTEM</span>
+          <h1>Make room for a<br><em>better morning.</em></h1>
+          <p>One thoughtful flow for hygiene, school readiness, personal progress and your connected station.</p>
+          <div class="morni-hero-tags"><span>✦ Guided routines</span><span>◉ Adaptive planning</span><span>⌁ Hardware-ready</span></div>
+        </div>
+        <div class="morni-command-orb"><div class="orb-sun"></div><span>YOUR DAY<br><b>STARTS HERE</b></span></div>
+      </section>
+
+      <section class="morni-software-demo-note">
+        <span class="morni-demo-note-icon">✦</span>
+        <div><b>${isDemoMode() ? "Software-only demo is ready" : "Hardware integration status"}</b>
+        <p>${isDemoMode()
+          ? "MORNI can be presented without the physical station. Use Demo mode to demonstrate the guided routine, handwash timer, planner, rewards shop, readiness insights and judge tour. Demo actions are simulated in the app and are not real sensor readings or dispenser operations."
+          : "The app can still be demonstrated if the physical station is unfinished. Switch to Demo mode in Settings to run simulated interactions without sending commands to the ESP8266."}</p></div>
+        <button class="btn btn-soft" data-page="showcase">Open judge tour ↗</button>
+      </section>
+
+      <div class="morni-section-heading"><div><span class="morni-kicker">TODAY AT A GLANCE</span><h2>Your morning command centre</h2></div><span class="morni-date-stamp">${dateText()}</span></div>
+      <div class="morni-score-row">
+        <section class="morni-score-card"><div class="score-dial" style="--score:${score.score * 3.6}deg"><div><b>${score.score}</b><small>/100</small></div></div><div><span class="morni-kicker">MORNI READINESS INDEX</span><h3>${score.score >= 80 ? "Looking ready" : score.score >= 50 ? "Building momentum" : "A fresh start"}</h3><p>A transparent app estimate from four daily signals.</p></div></section>
+        <section class="morni-water-card"><div class="water-card-top"><span>💧</span><span>PERSONAL TRACKER</span></div><b>${extra.water.count}<small> / ${extra.water.target}</small></b><p>Water entries today</p><div class="morni-meter"><i style="width:${waterPct}%"></i></div><div class="water-actions"><button data-extra-action="water-remove" aria-label="Remove one entry">−</button><button data-extra-action="water-add">+ Add entry</button></div><div class="water-target-control"><label for="waterTarget">Personal target</label><input id="waterTarget" type="number" min="1" max="20" value="${extra.water.target}"><button data-extra-action="water-target-save">Save</button></div><small class="morni-disclaimer">A simple log, not a medical hydration target.</small></section>
+      </div>
+
+      <section class="morni-nudge-card"><span class="nudge-icon">✳</span><div><span class="morni-kicker">MORNI'S NEXT BEST STEP</span><h3>${nudge.title}</h3><p>${nudge.text}</p></div><button class="btn btn-primary" data-page="${nudge.page}">Go to step ↗</button></section>
+
+      <div class="morni-section-heading"><div><span class="morni-kicker">THE MORNI TOOLKIT</span><h2>Everything in one place</h2></div></div>
+      <div class="feature-card-grid">
+        ${featureCard("Guided handwash", "A timed, six-stage hygiene guide that works without sensors.", "◌", "handwash", "30-SECOND GUIDE")}
+        ${featureCard("Morning planner", "Build a realistic schedule around your departure time.", "◷", "planner", "PLAN YOUR WINDOW")}
+        ${featureCard("Rewards studio", "Turn earned points into profile collectibles.", "✧", "rewards", `${xp.points} POINTS AVAILABLE`)}
+        ${featureCard("Readiness lab", "See the four signals behind your MORNI score.", "◎", "impact", "VIEW YOUR INDEX")}
+        ${featureCard("Digital station", "Explore the twin and the real hardware connection state.", "⌁", "device", state.device.hardwareReady ? "FIRMWARE READY" : "HARDWARE INTEGRATION PENDING")}
+        ${featureCard("Judge presentation", "A guided product tour with honest, hardware-independent demos.", "▶", "showcase", "PRESENT MORNI")}
+        ${featureCard("Focus space", "An optional five-minute get-ready focus block.", "◉", "focus", "START A FOCUS BLOCK")}
+      </div>
+
+      <div class="morni-lower-grid">
+        <section class="morni-glass-panel"><div class="morni-panel-head"><div><span class="morni-kicker">YOUR COLLECTION</span><h3>Equipped collectible</h3></div><span class="morni-collectible-icon">${reward.icon}</span></div><div class="equipped-preview"><b>${reward.name}</b><small>${reward.description}</small></div><button class="text-link" data-page="rewards">Open rewards studio →</button></section>
+        <section class="morni-glass-panel"><div class="morni-panel-head"><div><span class="morni-kicker">MORNING SIGNALS</span><h3>Four parts of readiness</h3></div><span>◈</span></div>${[["Hygiene",score.hygiene],["School prep",score.school],["Morning plan",score.plan],["7-day consistency",score.consistency]].map(([label,value])=>`<div class="readiness-line"><span>${label}</span><b>${value}%</b><div class="morni-meter"><i style="width:${value}%"></i></div></div>`).join("")}</section>
+      </div>
+      <p class="morni-footnote">MORNI is a personal organisation and hygiene-support concept. The Readiness Index is an app-generated progress indicator, not a health assessment.</p>
+    </div>`;
+  }
+
+  function handwashPage() {
+    const remaining = handwashElapsed();
+    const stage = handwashStages[extra.handwash.running ? handwashStageForRemaining(remaining) : extra.handwash.stageIndex] || handwashStages[0];
+    const done = remaining === 0 && extra.handwash.lastCompletedDate === today();
+    return `<div class="page-enter morni-feature-page">
+      <div class="morni-page-heading"><div><span class="morni-kicker">MORNI HYGIENE LAB · GUIDED MODE</span><h1>Clean hands,<br><em>step by step.</em></h1><p>A clear 30-second guide that stays useful even when the physical station is not connected.</p></div><span class="morni-live-label">APP-GUIDED · NOT SENSOR VERIFIED</span></div>
+      <div class="handwash-workspace">
+        <section class="morni-glass-panel handwash-main-panel">
+          <div class="handwash-stage-visual"><div class="handwash-glow"></div><div class="handwash-stage-icon" id="handwashStageIcon">${done ? "✓" : stage.icon}</div><div class="handwash-step-count">STEP ${done ? "6" : extra.handwash.stageIndex + 1} / 6</div></div>
+          <div class="handwash-current"><span class="morni-kicker">CURRENT STEP</span><h2 id="handwashStageTitle">${done ? "Guide complete" : stage.title}</h2><p id="handwashStageDetail">${done ? "Rinse thoroughly and dry with a clean towel." : stage.detail}</p></div>
+          <div class="handwash-timer-wrap"><div class="timer-ring handwash-ring" id="handwashRing" style="--ring:${(30 - remaining) / 30 * 360}deg"><div class="timer-center"><b id="handwashDigits">${fmt(remaining)}</b><small>SECONDS LEFT</small></div></div><span id="handwashProgressText">${Math.round((30 - remaining) / 30 * 100)}% complete</span></div>
+          <div class="handwash-controls"><button class="btn btn-primary" data-extra-action="${extra.handwash.running ? "handwash-pause" : "handwash-start"}" ${done ? "disabled" : ""}>${extra.handwash.running ? "Pause guide" : done ? "Completed today" : "Start 30-second guide"}</button><button class="btn btn-soft" data-extra-action="handwash-reset">Reset</button></div>
+          <p class="morni-disclaimer">This is a timed educational guide. It does not detect your hands, measure soap, or verify that washing physically occurred.</p>
+        </section>
+        <section class="morni-glass-panel handwash-steps-panel"><div class="morni-panel-head"><div><span class="morni-kicker">THE SIX-STAGE FLOW</span><h3>Follow the sequence</h3></div><span>✦</span></div>
+          ${handwashStages.map((item,index)=>`<div class="handwash-step-row ${index < extra.handwash.stageIndex || done ? "step-passed" : index === extra.handwash.stageIndex ? "step-current" : ""}"><span class="step-row-icon">${item.icon}</span><div><b>${item.title}</b><small>${item.detail}</small></div><em>${item.seconds}s</em></div>`).join("")}
+          <div class="handwash-tip"><b>Remember</b><p>Use soap, cover all hand surfaces, rinse well and dry. Follow local school or public-health guidance if it specifies a different procedure.</p></div>
+        </section>
+      </div>
+      <div class="morni-section-heading"><div><span class="morni-kicker">YOUR HISTORY</span><h2>Guided sessions</h2></div><span class="morni-date-stamp">${extra.handwash.sessions.length} saved</span></div>
+      <section class="morni-glass-panel">${extra.handwash.sessions.length ? extra.handwash.sessions.slice(0,6).map(session=>`<div class="morni-history-row"><span>✓</span><div><b>Guided wash completed</b><small>${safe(session.source)} · ${new Date(session.time).toLocaleString()}</small></div><em>30 sec</em></div>`).join("") : `<div class="morni-empty-state"><span>◌</span><b>Your guided sessions will appear here.</b><small>Start the timer when you are ready to follow the steps.</small></div>`}</section>
+    </div>`;
+  }
+
+  function plannerPage() {
+    const summary = plannerSummary();
+    let cursor = parseClock(extra.plan.wake) || 0;
+    const taskRows = extra.plan.tasks.map(task => {
+      const start = cursor;
+      cursor += Math.max(0, Number(task.minutes) || 0);
+      return { ...task, startLabel: clockLabel(start), endLabel: clockLabel(cursor) };
+    });
+    const completedTasks = extra.plan.tasks.filter(task=>task.done).length;
+    return `<div class="page-enter morni-feature-page">
+      <div class="morni-page-heading"><div><span class="morni-kicker">MORNI FLOW PLANNER</span><h1>Make time for<br><em>what matters.</em></h1><p>Plan backwards from when you need to leave. MORNI makes the time budget visible.</p></div><span class="morni-live-label">EDITABLE ESTIMATES</span></div>
+      <div class="planner-top-grid">
+        <section class="morni-glass-panel planner-settings"><div class="morni-panel-head"><div><span class="morni-kicker">YOUR TIME WINDOW</span><h3>Set your morning</h3></div><span>◷</span></div>
+          <label class="morni-field">Wake-up time<input id="planWake" type="time" value="${safe(extra.plan.wake)}"></label>
+          <label class="morni-field">Leave home at<input id="planLeave" type="time" value="${safe(extra.plan.leave)}"></label>
+          <label class="morni-field">Extra buffer (minutes)<input id="planBuffer" type="number" min="0" max="90" value="${Number(extra.plan.buffer)||0}"></label>
+          <button class="btn btn-primary" data-extra-action="plan-save">Update time window</button>
+        </section>
+        <section class="morni-glass-panel time-budget-card"><span class="morni-kicker">YOUR TIME BUDGET</span><div class="time-budget-number">${summary.valid ? summary.available : "—"}<small>minutes available</small></div><div class="budget-comparison"><div><small>PLANNED TASKS + BUFFER</small><b>${summary.needed} min</b></div><div><small>TIME ${summary.gap >= 0 ? "LEFT OVER" : "OVER BUDGET"}</small><b class="${summary.gap < 0 ? "budget-warning" : ""}">${summary.valid ? Math.abs(summary.gap) : "—"} min</b></div></div><p>${!summary.valid ? "Choose two different times to calculate your morning window." : summary.gap >= 0 ? "Your plan fits inside the selected time window." : "Your current plan is longer than the available window. Shorten or move tasks rather than rushing."}</p></section>
+      </div>
+      <div class="morni-section-heading"><div><span class="morni-kicker">YOUR SEQUENCE</span><h2>Morning timeline</h2></div><span class="morni-date-stamp">${completedTasks}/${extra.plan.tasks.length} done</span></div>
+      <section class="morni-glass-panel planner-timeline">${taskRows.map((task,index)=>`<div class="planner-task-row ${task.done ? "task-done" : ""}"><button class="planner-check" data-extra-action="plan-toggle" data-extra-id="${safe(task.id)}" aria-label="Toggle ${safe(task.title)}">${task.done ? "✓" : index+1}</button><div class="planner-task-copy"><b>${safe(task.title)}</b><small>${task.startLabel} – ${task.endLabel} · ${task.minutes} min</small></div>${task.id.startsWith("custom-") ? `<button class="planner-remove" data-extra-action="plan-remove" data-extra-id="${safe(task.id)}" aria-label="Remove task">×</button>` : `<span class="planner-fixed-label">PLAN</span>`}</div>`).join("")}</section>
+      <section class="morni-glass-panel add-task-panel"><div><span class="morni-kicker">MAKE IT YOURS</span><h3>Add a task</h3><p>Keep the plan personal. Add anything you want to remember before leaving.</p></div><div class="add-task-fields"><input id="newTaskTitle" maxlength="60" placeholder="e.g. Feed the pet"><input id="newTaskMinutes" type="number" min="1" max="180" value="5" aria-label="Task minutes"><button class="btn btn-primary" data-extra-action="plan-add">Add task</button></div></section>
+      <p class="morni-disclaimer">All durations are user-editable estimates. MORNI does not assume travel time, traffic, school schedules or your actual pace.</p>
+    </div>`;
+  }
+
+  function rewardsPage() {
+    return `<div class="page-enter morni-feature-page">
+      <div class="morni-page-heading"><div><span class="morni-kicker">MORNI REWARDS ECONOMY</span><h1>Small wins.<br><em>Real unlocks.</em></h1><p>Use points earned through your routine to collect profile cosmetics. Rewards do not control or alter the physical station.</p></div><div class="points-wallet"><span>YOUR BALANCE</span><b>✧ ${xp.points}</b><small>MORNI points</small></div></div>
+      <div class="reward-feature-banner"><div><span class="morni-kicker">YOUR CURRENT COLLECTIBLE</span><h2>${(rewardCatalog.find(item=>item.id===extra.rewards.equipped)||rewardCatalog[0]).name}</h2><p>Collect, unlock and equip your favourite MORNI identity.</p></div><span>${(rewardCatalog.find(item=>item.id===extra.rewards.equipped)||rewardCatalog[0]).icon}</span></div>
+      <div class="morni-section-heading"><div><span class="morni-kicker">THE COLLECTION</span><h2>Rewards shop</h2></div><span class="morni-date-stamp">${extra.rewards.owned.length}/${rewardCatalog.length} owned</span></div>
+      <div class="reward-shop-grid">${rewardCatalog.map(item=>{
+        const owned=extra.rewards.owned.includes(item.id);
+        const equipped=extra.rewards.equipped===item.id;
+        const canBuy=xp.points>=item.cost;
+        return `<article class="reward-item ${owned?"reward-owned":""}"><div class="reward-item-art"><span>${item.icon}</span><small>${item.category}</small></div><div class="reward-item-copy"><h3>${item.name}</h3><p>${item.description}</p></div><div class="reward-item-footer"><b>${item.cost===0?"FREE":`✧ ${item.cost}`}</b>${owned?`<button class="btn ${equipped?"btn-soft":"btn-primary"}" data-extra-action="reward-equip" data-extra-id="${item.id}" ${equipped?"disabled":""}>${equipped?"Equipped":"Equip"}</button>`:`<button class="btn ${canBuy?"btn-primary":"btn-soft"}" data-extra-action="reward-buy" data-extra-id="${item.id}" ${canBuy?"":"disabled"}>Unlock</button>`}</div></article>`;
+      }).join("")}</div>
+      <div class="morni-section-heading"><div><span class="morni-kicker">YOUR ACTIVITY</span><h2>Purchase history</h2></div></div>
+      <section class="morni-glass-panel">${extra.rewards.transactions.length?extra.rewards.transactions.slice(0,8).map(item=>`<div class="morni-history-row"><span>✧</span><div><b>${safe(item.name)}</b><small>${new Date(item.date).toLocaleString()}</small></div><em>−${item.cost} pts</em></div>`).join(""):`<div class="morni-empty-state"><span>✧</span><b>Your first unlock is waiting.</b><small>Earn points by completing your routine and personal missions.</small></div>`}</section>
+      <p class="morni-disclaimer">Points and collectibles are stored in this browser. They have no cash value and do not represent physical prizes.</p>
+    </div>`;
+  }
+
+  function impactPage() {
+    const s=readinessBreakdown();
+    const ml=Math.max(0,Number(state.used.handwash)||0);
+    const capacity=Math.max(1,Number(state.capacity.handwash)||250);
+    const remaining=Math.max(0,capacity-ml);
+    const percent=Math.max(0,Math.min(100,remaining/capacity*100));
+    const signals=[
+      {id:"hygiene",name:"Hygiene routine",value:s.hygiene,detail:"Brushing and handwash steps recorded today",icon:"◌"},
+      {id:"school",name:"School readiness",value:s.school,detail:"Items checked in your school checklist",icon:"▤"},
+      {id:"plan",name:"Morning plan",value:s.plan,detail:"Tasks marked complete in your personal plan",icon:"◷"},
+      {id:"consistency",name:"Recent consistency",value:s.consistency,detail:"Completed routines across the last seven days",icon:"✧"}
+    ];
+    return `<div class="page-enter morni-feature-page">
+      <div class="morni-page-heading"><div><span class="morni-kicker">MORNI READINESS LAB</span><h1>See the pattern.<br><em>Shape the next day.</em></h1><p>A transparent view of the signals MORNI tracks so you can decide what to improve next.</p></div><span class="morni-live-label">PERSONAL PROGRESS · NOT A HEALTH SCORE</span></div>
+      <section class="readiness-hero-card"><div class="readiness-big-dial" style="--score:${s.score*3.6}deg"><div><b>${s.score}</b><small>INDEX</small></div></div><div><span class="morni-kicker">MORNI READINESS INDEX</span><h2>${s.score>=80?"A strong start is taking shape":s.score>=50?"You're building your flow":"Every morning is a new opportunity"}</h2><p>The index is the simple average of four equally weighted app signals. It is an organisation indicator—not a clinical, scientific or school performance assessment.</p></div></section>
+      <div class="morni-section-heading"><div><span class="morni-kicker">THE FORMULA</span><h2>Four transparent signals</h2></div></div>
+      <div class="readiness-signal-grid">${signals.map(item=>`<article class="readiness-signal"><span>${item.icon}</span><div><b>${item.name}</b><small>${item.detail}</small></div><strong>${item.value}%</strong><div class="morni-meter"><i style="width:${item.value}%"></i></div></article>`).join("")}</div>
+      <section class="morni-glass-panel formula-panel"><span class="morni-kicker">HOW THE INDEX IS CALCULATED</span><h3>(Hygiene + School + Plan + Consistency) ÷ 4</h3><p>Each signal is converted to a percentage using recorded app actions. Missing actions lower the indicator; the score does not guess what happened outside the app.</p></section>
+      <div class="morni-section-heading"><div><span class="morni-kicker">RESOURCE AWARENESS</span><h2>Refill intelligence</h2></div></div>
+      <section class="morni-glass-panel resource-panel"><div class="resource-bottle"><span>🧴</span><div><b>${Math.round(remaining)} ml</b><small>estimated remaining</small></div></div><div class="resource-details"><div class="resource-detail-top"><b>Handwash bottle estimate</b><span>${Math.round(percent)}%</span></div><div class="morni-meter"><i style="width:${percent}%"></i></div><p>${Math.round(ml)} ml estimated used from a ${Math.round(capacity)} ml capacity.</p><label class="morni-field">Estimated ml per pump<input id="resourceMl" type="number" min="0.1" max="30" step="0.1" value="${Number(extra.resource.mlPerPump).toFixed(1)}"></label><button class="btn btn-primary" data-extra-action="resource-save">Save estimate</button><small class="morni-disclaimer">This is a calculated estimate based on recorded uses and the value you enter. It is not a liquid-level sensor reading.</small></div></section>
+      <section class="morni-nudge-card"><span class="nudge-icon">✳</span><div><span class="morni-kicker">ONE PRACTICAL IMPROVEMENT</span><h3>${adaptiveNudge().title}</h3><p>${adaptiveNudge().text}</p></div><button class="btn btn-primary" data-page="${adaptiveNudge().page}">Take action ↗</button></section>
+    </div>`;
+  }
+
+  function showcasePage() {
+    const current=showcaseSteps[extra.showcase.step]||showcaseSteps[0];
+    const done=extra.showcase.completed.length;
+    return `<div class="page-enter morni-feature-page showcase-page">
+      <section class="showcase-hero"><span class="morni-kicker">MORNI · COMPETITION PRESENTATION MODE</span><h1>A better morning,<br><em>designed as a system.</em></h1><p>A guided walkthrough of the product vision, the working software experience and the path to physical integration.</p><div class="showcase-trust-tags"><span>✓ Works as a software demo</span><span>✓ Hardware status is transparent</span><span>✓ No fabricated sensor data</span></div></section>
+      <div class="showcase-progress-head"><div><span class="morni-kicker">THE SIX-MINUTE STORY</span><h2>Presentation journey</h2></div><b>${done}/6 explored</b></div>
+      <div class="showcase-layout"><section class="morni-glass-panel showcase-step-card"><div class="showcase-step-count">CHAPTER ${String(extra.showcase.step+1).padStart(2,"0")} / 06</div><div class="showcase-step-mark">${["✦","◌","◷","✧","◎","⌁"][extra.showcase.step]}</div><span class="morni-kicker">THE STORY</span><h2>${current.title}</h2><p>${current.description}</p><div class="showcase-proof"><b>WHAT TO SHOW THE PANEL</b><span>${current.proof}</span></div><div class="showcase-controls"><button class="btn btn-soft" data-extra-action="tour-prev" ${extra.showcase.step===0?"disabled":""}>← Previous</button><button class="btn btn-primary" data-extra-action="tour-open">Open this feature ↗</button><button class="btn btn-soft" data-extra-action="tour-next">${extra.showcase.step===5?"Restart tour":"Next chapter →"}</button></div></section><section class="morni-glass-panel showcase-chapters"><span class="morni-kicker">PRESENTATION OUTLINE</span>${showcaseSteps.map((item,index)=>`<button class="showcase-chapter ${index===extra.showcase.step?"chapter-active":""} ${extra.showcase.completed.includes(index)?"chapter-done":""}" data-extra-action="tour-select" data-extra-index="${index}"><span>${extra.showcase.completed.includes(index)?"✓":String(index+1).padStart(2,"0")}</span><div><b>${item.title}</b><small>${item.page.replace("lab","command centre").replace("handwash","guided hygiene").replace("planner","time planning").replace("rewards","points economy").replace("impact","readiness analytics").replace("device","hardware integration")}</small></div><em>↗</em></button>`).join("")}</section></div>
+      <section class="showcase-honesty"><span>ⓘ</span><div><b>How to present hardware honestly</b><p>Say: “The software experience is operational in simulation mode. The ESP8266 communication layer is designed for integration, while sensor and dispenser readiness is still being completed. We are showing the complete user journey today and will connect verified hardware when it is ready.” Only claim the parts you have physically tested.</p></div></section>
+      <div class="showcase-footer-actions"><button class="btn btn-primary" data-extra-action="tour-reset">Reset presentation progress</button><button class="btn btn-soft" data-extra-action="export-data">Export MORNI data backup</button></div>
+    </div>`;
+  }
+
+  function focusPage() {
+    const remaining=extra.focus.running?Math.max(0,Math.ceil((extra.focus.endsAt-Date.now())/1000)):extra.focus.remaining;
+    return `<div class="page-enter morni-feature-page"><div class="morni-page-heading"><div><span class="morni-kicker">MORNI FOCUS SPACE</span><h1>One thing<br><em>at a time.</em></h1><p>A short, optional get-ready focus block for one small task before you leave.</p></div><span class="morni-live-label">OPTIONAL · 5 MINUTES</span></div><section class="morni-glass-panel focus-card"><div class="focus-orb"><span>◉</span></div><div class="focus-timer" id="focusDigits">${fmt(remaining)}</div><p>${extra.focus.running?"Stay with the one task you chose.":"Choose one small task, then begin when ready."}</p><div class="focus-controls"><button class="btn btn-primary" data-extra-action="focus-toggle">${extra.focus.running?"Pause focus":"Start 5-minute focus"}</button><button class="btn btn-soft" data-extra-action="focus-reset">Reset</button></div><small>${extra.focus.sessions} completed focus sessions recorded locally.</small></section><p class="morni-disclaimer">This is a productivity timer, not a treatment or a requirement. Skip it whenever it is not useful.</p></div>`;
+  }
+
+  function tickFocus() {
+    const remaining=Math.max(0,Math.ceil((extra.focus.endsAt-Date.now())/1000));
+    extra.focus.remaining=remaining;
+    const digits=$("#focusDigits"); if(digits) digits.textContent=fmt(remaining);
+    if(remaining<=0){
+      clearInterval(focusLoop); extra.focus.running=false; extra.focus.endsAt=0; extra.focus.remaining=300; extra.focus.sessions+=1; saveExtra(); award("focus-session",3,"Focus session complete"); featureToast("Focus block complete. Nice work."); render();
+    }
+  }
+
+  function toggleFocus() {
+    if(extra.focus.running){
+      extra.focus.remaining=Math.max(0,Math.ceil((extra.focus.endsAt-Date.now())/1000)); extra.focus.running=false; extra.focus.endsAt=0; clearInterval(focusLoop); saveExtra(); render(); return;
+    }
+    if(extra.focus.remaining<=0) extra.focus.remaining=300;
+    extra.focus.running=true; extra.focus.endsAt=Date.now()+extra.focus.remaining*1000; saveExtra(); clearInterval(focusLoop); focusLoop=setInterval(tickFocus,250); render();
+  }
+
+  function exportMorniData() {
+    const payload={
+      product:"MORNI",
+      exportVersion:1,
+      exportedAt:new Date().toISOString(),
+      note:"Local browser backup. Hardware telemetry is not included unless present in the app state.",
+      state,
+      points:xp,
+      experience:extra
+    };
+    const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement("a");
+    link.href=url; link.download=`morni-backup-${today()}.json`;
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+    featureToast("MORNI backup prepared for download.");
+  }
+
+  function handleExtraAction(action, element) {
+    const id=element?.dataset.extraId;
+    if(action==="handwash-start") startHandwashGuide();
+    else if(action==="handwash-pause") pauseHandwashGuide();
+    else if(action==="handwash-reset") resetHandwashGuide();
+    else if(action==="water-add") addWaterGlass();
+    else if(action==="water-remove") removeWaterGlass();
+    else if(action==="water-target-save") saveWaterTarget();
+    else if(action==="plan-save") saveMorningPlan();
+    else if(action==="plan-toggle") togglePlanTask(id);
+    else if(action==="plan-add") addPlanTask();
+    else if(action==="plan-remove") removePlanTask(id);
+    else if(action==="reward-buy") buyReward(id);
+    else if(action==="reward-equip") equipReward(id);
+    else if(action==="resource-save") {
+      const value=Number($("#resourceMl")?.value);
+      if(!Number.isFinite(value)||value<0.1||value>30){featureToast("Enter an estimate between 0.1 and 30 ml.");return;}
+      extra.resource.mlPerPump=value; state.average.handwash=value; saveExtra(); save(); render(); featureToast("Dispense estimate saved.");
+    }
+    else if(action==="tour-prev") { extra.showcase.step=Math.max(0,extra.showcase.step-1); saveExtra(); render(); }
+    else if(action==="tour-next") { extra.showcase.completed=[...new Set([...extra.showcase.completed,extra.showcase.step])]; extra.showcase.step=(extra.showcase.step+1)%showcaseSteps.length; saveExtra(); render(); }
+    else if(action==="tour-select") { extra.showcase.step=Math.max(0,Math.min(showcaseSteps.length-1,Number(element.dataset.extraIndex)||0)); saveExtra(); render(); }
+    else if(action==="tour-open") { extra.showcase.completed=[...new Set([...extra.showcase.completed,extra.showcase.step])]; saveExtra(); navigate(showcaseSteps[extra.showcase.step].page); }
+    else if(action==="tour-reset") { extra.showcase={step:0,completed:[]}; saveExtra(); render(); featureToast("Presentation tour reset."); }
+    else if(action==="export-data") exportMorniData();
+    else if(action==="focus-toggle") toggleFocus();
+    else if(action==="focus-reset") { clearInterval(focusLoop); extra.focus={running:false,remaining:300,endsAt:0,sessions:extra.focus.sessions||0}; saveExtra(); render(); }
+  }
+
+  function injectUltimateStyles() {
+    if($("#morni-ultimate-styles")) return;
+    const css=`
+
+      :root{
+  --mori-ink:#193b2a;
+  --mori-green:#2f6b45;
+  --mori-leaf:#78a77a;
+  --mori-orange:#e5a14b;
+  --mori-cream:#fbf8ef;
+  --mori-line:rgba(39,82,53,.13);
+  --mori-muted:#718174;
+  --mori-shadow:0 18px 55px rgba(32,68,43,.08)
+}
+
+      .morni-home-launch{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:14px;
+  padding:16px 19px;
+  margin:16px 0;
+  border:1px solid var(--mori-line);
+  border-radius:17px;
+  background:linear-gradient(100deg,#f7f2e4,#edf4e9)
+}
+.morni-home-launch b{
+  display:block;
+  font-size:14px;
+  color:#244d35;
+  margin:4px 0
+}
+.morni-home-launch small{
+  display:block;
+  font-size:10px;
+  color:#718174
+}
+.morni-feature-nav{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  overflow-x:auto;
+  padding:9px 0 16px;
+  margin-bottom:4px;
+  scrollbar-width:thin
+}
+
+      .morni-nav-label{
+  font-size:9px;
+  letter-spacing:1.5px;
+  font-weight:900;
+  color:var(--mori-muted);
+  white-space:nowrap;
+  margin-right:7px
+}
+
+      .morni-feature-nav button{
+  border:1px solid var(--mori-line);
+  background:var(--surface,var(--mori-cream));
+  color:var(--text,var(--mori-ink));
+  border-radius:999px;
+  padding:9px 13px;
+  min-height:38px;
+  font-size:11px;
+  font-weight:750;
+  white-space:nowrap;
+  display:flex;
+  align-items:center;
+  gap:7px;
+  cursor:pointer;
+  transition:.2s
+}
+
+      .morni-feature-nav button:hover,.morni-feature-nav button.active{
+  background:#244d35;
+  color:#fff;
+  border-color:#244d35;
+  transform:translateY(-1px)
+}
+
+      .morni-feature-nav button span{
+  font-size:14px
+}
+
+      .morni-command-hero{
+  position:relative;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:25px;
+  min-height:270px;
+  padding:35px 42px;
+  border-radius:27px;
+  overflow:hidden;
+  background:linear-gradient(112deg,#173e2b 0%,#285b3b 58%,#d78e3d 160%);
+  color:#fff;
+  box-shadow:var(--mori-shadow)
+}
+
+      .morni-command-hero:after{
+  content:"";
+  position:absolute;
+  width:360px;
+  height:360px;
+  border:1px solid rgba(255,255,255,.15);
+  border-radius:50%;
+  right:5%;
+  top:-180px;
+  box-shadow:0 0 0 35px rgba(255,255,255,.035),0 0 0 75px rgba(255,255,255,.025)
+}
+
+      .morni-command-copy{
+  position:relative;
+  z-index:1;
+  max-width:620px
+}
+.morni-kicker{
+  display:block;
+  font-size:9px;
+  letter-spacing:1.8px;
+  font-weight:900;
+  color:#a4c5a4
+}
+.morni-command-hero h1,.morni-page-heading h1,.showcase-hero h1{
+  font-size:clamp(34px,5vw,56px);
+  line-height:1.04;
+  letter-spacing:-2px;
+  margin:14px 0;
+  color:inherit
+}
+.morni-command-hero h1 em,.morni-page-heading h1 em,.showcase-hero h1 em{
+  font-family:Georgia,serif;
+  font-weight:500;
+  color:#f2bd70
+}
+.morni-command-hero p{
+  color:rgba(255,255,255,.78);
+  max-width:540px;
+  line-height:1.7;
+  font-size:14px
+}
+.morni-hero-tags{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin-top:20px
+}
+.morni-hero-tags span,.showcase-trust-tags span{
+  font-size:10px;
+  padding:7px 10px;
+  border:1px solid rgba(255,255,255,.22);
+  border-radius:30px;
+  color:#fff;
+  background:rgba(255,255,255,.07)
+}
+
+      .morni-command-orb{
+  width:180px;
+  height:180px;
+  flex:0 0 180px;
+  border-radius:50%;
+  border:1px solid rgba(255,255,255,.3);
+  display:grid;
+  place-items:center;
+  position:relative;
+  background:radial-gradient(circle at 50% 43%,rgba(245,190,105,.22),rgba(255,255,255,.03) 65%);
+  z-index:1;
+  text-align:center;
+  font-size:9px;
+  letter-spacing:2px;
+  color:#e8f0df
+}
+.morni-command-orb:before,.morni-command-orb:after{
+  content:"";
+  position:absolute;
+  inset:13px;
+  border:1px dashed rgba(255,255,255,.27);
+  border-radius:50%
+}
+.morni-command-orb:after{
+  inset:-13px;
+  border-style:solid;
+  opacity:.4
+}
+.morni-command-orb b{
+  font-size:12px;
+  color:#f2bd70
+}
+.orb-sun{
+  width:68px;
+  height:68px;
+  border-radius:50%;
+  background:linear-gradient(145deg,#ffe2a2,#e99c45);
+  box-shadow:0 0 45px rgba(243,176,83,.45);
+  position:absolute;
+  top:34px
+}
+.morni-command-orb span{
+  position:relative;
+  z-index:1;
+  margin-top:90px
+}
+
+      .morni-section-heading{
+  display:flex;
+  align-items:end;
+  justify-content:space-between;
+  gap:15px;
+  margin:29px 0 14px
+}
+.morni-section-heading h2{
+  font-size:22px;
+  color:var(--text,var(--mori-ink));
+  margin:5px 0 0;
+  letter-spacing:-.6px
+}
+.morni-section-heading .morni-kicker{
+  color:var(--mori-green)
+}
+.morni-date-stamp{
+  font-size:10px;
+  color:var(--mori-muted);
+  font-weight:800;
+  white-space:nowrap
+}
+
+      .morni-score-row{
+  display:grid;
+  grid-template-columns:1.4fr 1fr;
+  gap:14px;
+  margin-top:15px
+}
+.morni-score-card,.morni-water-card,.morni-glass-panel{
+  background:var(--surface,var(--mori-cream));
+  border:1px solid var(--mori-line);
+  border-radius:21px;
+  padding:20px;
+  box-shadow:var(--mori-shadow);
+  min-width:0
+}
+.morni-score-card{
+  display:flex;
+  align-items:center;
+  gap:20px
+}
+.score-dial,.readiness-big-dial{
+  width:116px;
+  height:116px;
+  flex:0 0 116px;
+  border-radius:50%;
+  display:grid;
+  place-items:center;
+  background:conic-gradient(#e3a14d var(--score),rgba(53,103,66,.12) 0);
+  position:relative
+}
+.score-dial:before,.readiness-big-dial:before{
+  content:"";
+  position:absolute;
+  inset:9px;
+  border-radius:50%;
+  background:var(--surface,var(--mori-cream))
+}
+.score-dial>div,.readiness-big-dial>div{
+  position:relative;
+  text-align:center
+}
+.score-dial b,.readiness-big-dial b{
+  display:block;
+  font-size:33px;
+  line-height:1;
+  color:var(--text,var(--mori-ink))
+}
+.score-dial small,.readiness-big-dial small{
+  font-size:10px;
+  color:var(--mori-muted)
+}
+.morni-score-card h3{
+  font-size:20px;
+  margin:6px 0;
+  color:var(--text,var(--mori-ink))
+}
+.morni-score-card p,.morni-water-card p{
+  font-size:12px;
+  line-height:1.6;
+  color:var(--mori-muted);
+  margin:4px 0
+}
+.morni-water-card{
+  background:linear-gradient(145deg,#f7fbf3,#edf5e9)
+}
+.water-card-top{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  font-size:9px;
+  letter-spacing:1px;
+  font-weight:900;
+  color:#66816b
+}
+.water-card-top span:first-child{
+  font-size:22px
+}
+.morni-water-card>b{
+  display:block;
+  font-size:30px;
+  color:#244d35;
+  margin-top:8px
+}
+.morni-water-card>b small{
+  font-size:15px;
+  color:#819582
+}
+.morni-meter{
+  height:7px;
+  border-radius:20px;
+  background:rgba(47,91,57,.11);
+  overflow:hidden;
+  margin:9px 0
+}
+.morni-meter i{
+  display:block;
+  height:100%;
+  border-radius:inherit;
+  background:linear-gradient(90deg,#579366,#e5a14b);
+  transition:width .35s
+}
+.water-actions{
+  display:flex;
+  gap:8px;
+  margin-top:9px
+}
+.water-actions button{
+  border:1px solid rgba(47,91,57,.17);
+  border-radius:9px;
+  background:#fff;
+  color:#315b3d;
+  padding:7px 12px;
+  font-size:11px;
+  font-weight:800;
+  cursor:pointer
+}
+.water-actions button:last-child{
+  background:#315b3d;
+  color:#fff
+}
+.water-target-control{display:flex;align-items:center;gap:6px;margin-top:9px}.water-target-control label{font-size:9px;color:#66816b;font-weight:800}.water-target-control input{width:46px;min-height:29px;border:1px solid rgba(47,91,57,.17);border-radius:8px;padding:4px;background:#fff;color:#315b3d;font-size:11px}.water-target-control button{border:0;border-radius:8px;background:#e7efdf;color:#315b3d;padding:7px 9px;font-size:9px;font-weight:900;cursor:pointer}
+      .morni-disclaimer,.morni-footnote{
+  display:block;
+  font-size:10px;
+  color:var(--mori-muted);
+  line-height:1.55;
+  margin-top:12px
+}
+
+      .morni-nudge-card{
+  display:flex;
+  align-items:center;
+  gap:15px;
+  padding:18px 20px;
+  margin-top:14px;
+  border-radius:18px;
+  background:linear-gradient(100deg,#fff8e9,#f3f7ed);
+  border:1px solid rgba(221,166,84,.2)
+}
+.nudge-icon{
+  width:42px;
+  height:42px;
+  border-radius:14px;
+  background:#e9ad58;
+  color:#fff;
+  display:grid;
+  place-items:center;
+  font-size:21px;
+  flex:0 0 42px
+}
+.morni-nudge-card>div{
+  flex:1;
+  min-width:0
+}
+.morni-nudge-card .morni-kicker{
+  color:#9c7138
+}
+.morni-nudge-card h3{
+  font-size:16px;
+  margin:4px 0;
+  color:#244d35
+}
+.morni-nudge-card p{
+  font-size:12px;
+  color:#6f7e70;
+  margin:0;
+  line-height:1.5
+}
+.morni-nudge-card .btn{
+  white-space:nowrap
+}
+
+      .feature-card-grid{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:12px
+}
+.feature-card{
+  display:flex;
+  align-items:flex-start;
+  gap:14px;
+  text-align:left;
+  padding:18px;
+  border-radius:18px;
+  border:1px solid var(--mori-line);
+  background:var(--surface,var(--mori-cream));
+  color:var(--text,var(--mori-ink));
+  cursor:pointer;
+  min-height:132px;
+  transition:.2s;
+  box-shadow:0 8px 25px rgba(32,68,43,.04)
+}
+.feature-card:hover{
+  transform:translateY(-3px);
+  box-shadow:var(--mori-shadow);
+  border-color:rgba(62,121,76,.35)
+}
+.feature-card-icon{
+  width:43px;
+  height:43px;
+  flex:0 0 43px;
+  border-radius:14px;
+  background:#edf4e9;
+  color:#315f3c;
+  display:grid;
+  place-items:center;
+  font-size:22px
+}
+.feature-card-copy{
+  display:flex;
+  flex-direction:column;
+  gap:6px
+}
+.feature-card-copy b{
+  font-size:14px
+}
+.feature-card-copy small{
+  font-size:11px;
+  line-height:1.5;
+  color:var(--mori-muted)
+}
+.feature-card-copy em{
+  font-size:8px;
+  letter-spacing:1px;
+  font-style:normal;
+  font-weight:900;
+  color:#b57b38;
+  margin-top:4px
+}
+.morni-lower-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:14px;
+  margin-top:14px
+}
+.morni-panel-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  margin-bottom:15px
+}
+.morni-panel-head h3{
+  font-size:17px;
+  margin:4px 0;
+  color:var(--text,var(--mori-ink))
+}
+.morni-panel-head>span{
+  font-size:22px;
+  color:#d99a48
+}
+.morni-collectible-icon{
+  width:45px;
+  height:45px;
+  border-radius:14px;
+  background:#f8edda;
+  display:grid;
+  place-items:center;
+  font-size:25px
+}
+.equipped-preview b{
+  display:block;
+  font-size:18px;
+  color:var(--text,var(--mori-ink))
+}
+.equipped-preview small{
+  display:block;
+  color:var(--mori-muted);
+  font-size:11px;
+  margin-top:4px
+}
+.text-link{
+  border:0;
+  background:transparent;
+  color:#3c784c;
+  font-size:11px;
+  font-weight:900;
+  padding:12px 0 0;
+  cursor:pointer
+}
+.readiness-line{
+  display:grid;
+  grid-template-columns:1fr auto;
+  gap:5px 12px;
+  margin:11px 0
+}
+.readiness-line span{
+  font-size:11px;
+  color:var(--mori-muted)
+}
+.readiness-line b{
+  font-size:11px;
+  color:var(--text,var(--mori-ink))
+}
+.readiness-line .morni-meter{
+  grid-column:1/-1;
+  margin:0
+}
+
+      .morni-page-heading{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:20px;
+  margin:12px 0 24px
+}
+.morni-page-heading>div{
+  max-width:680px
+}
+.morni-page-heading .morni-kicker{
+  color:#52815a
+}
+.morni-page-heading h1{
+  color:var(--text,var(--mori-ink));
+  margin:8px 0
+}
+.morni-page-heading p{
+  font-size:13px;
+  color:var(--mori-muted);
+  line-height:1.65;
+  max-width:610px
+}
+.morni-live-label{
+  font-size:9px;
+  font-weight:900;
+  letter-spacing:1px;
+  color:#9a6c30;
+  background:#fff3df;
+  border:1px solid #f0dfc4;
+  padding:9px 12px;
+  border-radius:30px;
+  white-space:nowrap
+}
+.handwash-workspace{
+  display:grid;
+  grid-template-columns:1.1fr .9fr;
+  gap:14px
+}
+.handwash-main-panel{
+  display:grid;
+  grid-template-columns:180px 1fr;
+  align-items:center;
+  gap:15px
+}
+.handwash-stage-visual{
+  width:170px;
+  height:170px;
+  border-radius:50%;
+  display:grid;
+  place-items:center;
+  position:relative;
+  background:radial-gradient(circle,#fff5df 0%,#f2f5e8 65%,transparent 66%)
+}
+.handwash-glow{
+  position:absolute;
+  inset:14px;
+  border:1px dashed rgba(52,103,61,.25);
+  border-radius:50%;
+  animation:morni-orbit 24s linear infinite
+}
+.handwash-stage-icon{
+  font-size:55px;
+  z-index:1
+}
+.handwash-step-count{
+  position:absolute;
+  bottom:13px;
+  font-size:8px;
+  font-weight:900;
+  letter-spacing:1px;
+  color:#68816b
+}
+.handwash-current .morni-kicker{
+  color:#63906b
+}
+.handwash-current h2{
+  font-size:25px;
+  color:var(--text,var(--mori-ink));
+  margin:7px 0
+}
+.handwash-current p{
+  font-size:12px;
+  line-height:1.6;
+  color:var(--mori-muted)
+}
+.handwash-timer-wrap{
+  grid-column:1/-1;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:18px;
+  padding:6px
+}
+.handwash-ring{
+  width:105px;
+  height:105px;
+  flex:0 0 105px
+}
+.handwash-ring .timer-center b{
+  font-size:23px
+}
+.handwash-timer-wrap>span{
+  font-size:11px;
+  color:var(--mori-muted);
+  font-weight:800
+}
+.handwash-controls{
+  grid-column:1/-1;
+  display:flex;
+  gap:9px;
+  justify-content:center
+}
+.handwash-steps-panel .morni-panel-head{
+  margin-bottom:7px
+}
+.handwash-step-row{
+  display:flex;
+  align-items:center;
+  gap:11px;
+  padding:12px 0;
+  border-bottom:1px solid var(--mori-line)
+}
+.step-row-icon{
+  width:34px;
+  height:34px;
+  border-radius:11px;
+  background:#f0f5eb;
+  display:grid;
+  place-items:center;
+  flex:0 0 34px
+}
+.handwash-step-row>div{
+  flex:1;
+  min-width:0
+}
+.handwash-step-row b{
+  display:block;
+  font-size:12px;
+  color:var(--text,var(--mori-ink))
+}
+.handwash-step-row small{
+  display:block;
+  font-size:10px;
+  color:var(--mori-muted);
+  line-height:1.4;
+  margin-top:3px
+}
+.handwash-step-row em{
+  font-size:10px;
+  font-style:normal;
+  color:#9b783f;
+  font-weight:900
+}
+.step-current .step-row-icon{
+  background:#e5f1df;
+  box-shadow:0 0 0 3px rgba(90,145,88,.1)
+}
+.step-current b{
+  color:#39734a
+}
+.step-passed{
+  opacity:.65
+}
+.handwash-tip{
+  margin-top:14px;
+  padding:12px;
+  border-radius:13px;
+  background:#f8f3e7
+}
+.handwash-tip b{
+  font-size:11px;
+  color:#966c36
+}
+.handwash-tip p{
+  font-size:10px;
+  line-height:1.5;
+  color:#777b68;
+  margin:5px 0 0
+}
+.morni-history-row{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  padding:12px 0;
+  border-bottom:1px solid var(--mori-line)
+}
+.morni-history-row:last-child{
+  border:0
+}
+.morni-history-row>span{
+  width:30px;
+  height:30px;
+  border-radius:10px;
+  background:#eaf3e7;
+  color:#3e794d;
+  display:grid;
+  place-items:center
+}
+.morni-history-row>div{
+  flex:1;
+  min-width:0
+}
+.morni-history-row b{
+  display:block;
+  font-size:12px;
+  color:var(--text,var(--mori-ink))
+}
+.morni-history-row small{
+  display:block;
+  font-size:10px;
+  color:var(--mori-muted);
+  margin-top:3px
+}
+.morni-history-row em{
+  font-style:normal;
+  font-size:10px;
+  color:#8a9b89
+}
+.morni-empty-state{
+  text-align:center;
+  padding:25px 10px;
+  color:var(--mori-muted)
+}
+.morni-empty-state>span{
+  font-size:30px;
+  color:#d59a4c
+}
+.morni-empty-state b{
+  display:block;
+  font-size:13px;
+  color:var(--text,var(--mori-ink));
+  margin:8px 0
+}
+.morni-empty-state small{
+  font-size:11px
+}
+
+      .planner-top-grid{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:14px
+}
+.morni-field{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  font-size:11px;
+  font-weight:800;
+  color:var(--text,var(--mori-ink));
+  margin:13px 0
+}
+.morni-field input,.add-task-fields input{
+  border:1px solid var(--mori-line);
+  border-radius:11px;
+  padding:11px 12px;
+  background:var(--surface,var(--mori-cream));
+  color:var(--text,var(--mori-ink));
+  font:inherit;
+  min-height:42px
+}
+.planner-settings .btn{
+  margin-top:7px
+}
+.time-budget-card{
+  background:linear-gradient(145deg,#244d35,#376a47);
+  color:#fff
+}
+.time-budget-card .morni-kicker{
+  color:#b9d3ae
+}
+.time-budget-number{
+  font-size:55px;
+  font-weight:850;
+  letter-spacing:-2px;
+  margin:12px 0
+}
+.time-budget-number small{
+  display:block;
+  font-size:11px;
+  letter-spacing:0;
+  font-weight:600;
+  color:rgba(255,255,255,.7)
+}
+.budget-comparison{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+  border-top:1px solid rgba(255,255,255,.18);
+  padding-top:13px
+}
+.budget-comparison small{
+  display:block;
+  font-size:8px;
+  letter-spacing:1px;
+  color:rgba(255,255,255,.65)
+}
+.budget-comparison b{
+  display:block;
+  font-size:17px;
+  margin-top:5px
+}
+.budget-comparison .budget-warning{
+  color:#ffcf9b
+}
+.time-budget-card>p{
+  font-size:11px;
+  line-height:1.5;
+  color:rgba(255,255,255,.78)
+}
+.planner-timeline{
+  padding:8px 20px
+}
+.planner-task-row{
+  display:flex;
+  align-items:center;
+  gap:13px;
+  padding:14px 0;
+  border-bottom:1px solid var(--mori-line)
+}
+.planner-task-row:last-child{
+  border:0
+}
+.planner-check{
+  width:31px;
+  height:31px;
+  border:1px solid #c8d8c4;
+  border-radius:50%;
+  background:#f7f8f1;
+  color:#456d4b;
+  font-weight:900;
+  cursor:pointer;
+  flex:0 0 31px
+}
+.task-done .planner-check{
+  background:#3e754a;
+  color:white
+}
+.planner-task-copy{
+  flex:1;
+  min-width:0
+}
+.planner-task-copy b{
+  display:block;
+  font-size:13px;
+  color:var(--text,var(--mori-ink))
+}
+.planner-task-copy small{
+  display:block;
+  font-size:10px;
+  color:var(--mori-muted);
+  margin-top:4px
+}
+.task-done .planner-task-copy b{
+  text-decoration:line-through;
+  opacity:.65
+}
+.planner-fixed-label{
+  font-size:8px;
+  letter-spacing:1px;
+  color:#9a8a6b
+}
+.planner-remove{
+  border:0;
+  background:transparent;
+  color:#b56c4c;
+  font-size:20px;
+  cursor:pointer
+}
+.add-task-panel{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:18px;
+  margin-top:14px
+}
+.add-task-panel h3{
+  margin:5px 0;
+  color:var(--text,var(--mori-ink))
+}
+.add-task-panel p{
+  font-size:11px;
+  color:var(--mori-muted);
+  margin:0
+}
+.add-task-fields{
+  display:flex;
+  gap:7px;
+  align-items:center
+}
+.add-task-fields input:first-child{
+  width:190px
+}
+.add-task-fields input:nth-child(2){
+  width:70px
+}
+
+      .points-wallet{
+  padding:15px 22px;
+  border-radius:17px;
+  background:#fff4df;
+  border:1px solid #efdfc2;
+  min-width:145px
+}
+.points-wallet span,.points-wallet small{
+  display:block;
+  font-size:8px;
+  letter-spacing:1px;
+  font-weight:900;
+  color:#9b7844
+}
+.points-wallet b{
+  display:block;
+  font-size:28px;
+  color:#244d35;
+  margin:5px 0
+}
+.reward-feature-banner{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:22px 28px;
+  border-radius:20px;
+  background:linear-gradient(105deg,#f7f0df,#eaf2e5);
+  border:1px solid #e6e5d4
+}
+.reward-feature-banner h2{
+  font-size:24px;
+  color:#244d35;
+  margin:7px 0
+}
+.reward-feature-banner p{
+  font-size:11px;
+  color:#718174
+}
+.reward-feature-banner>span{
+  font-size:52px
+}
+.reward-shop-grid{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:13px
+}
+.reward-item{
+  border:1px solid var(--mori-line);
+  border-radius:17px;
+  padding:14px;
+  background:var(--surface,var(--mori-cream));
+  box-shadow:0 8px 25px rgba(32,68,43,.04);
+  min-width:0
+}
+.reward-item-art{
+  height:100px;
+  border-radius:13px;
+  background:linear-gradient(145deg,#f4f3e7,#eaf2e5);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  position:relative
+}
+.reward-item-art>span{
+  font-size:43px
+}
+.reward-item-art small{
+  position:absolute;
+  right:8px;
+  top:8px;
+  background:rgba(255,255,255,.8);
+  border-radius:20px;
+  padding:4px 7px;
+  font-size:8px;
+  color:#718174
+}
+.reward-item-copy h3{
+  font-size:14px;
+  color:var(--text,var(--mori-ink));
+  margin:12px 0 5px
+}
+.reward-item-copy p{
+  font-size:10px;
+  line-height:1.5;
+  color:var(--mori-muted);
+  min-height:31px;
+  margin:0
+}
+.reward-item-footer{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  margin-top:12px
+}
+.reward-item-footer>b{
+  font-size:11px;
+  color:#9a713c
+}
+.reward-item-footer .btn{
+  padding:8px 12px;
+  min-height:34px;
+  font-size:10px
+}
+.reward-owned{
+  border-color:rgba(69,132,78,.25)
+}
+.reward-owned .reward-item-art{
+  background:linear-gradient(145deg,#e6f2e3,#f7f1e3)
+}
+
+      .readiness-hero-card{
+  display:flex;
+  align-items:center;
+  gap:25px;
+  padding:25px;
+  border-radius:22px;
+  background:linear-gradient(110deg,#1d482f,#376c46);
+  color:#fff
+}
+.readiness-big-dial{
+  width:140px;
+  height:140px;
+  flex-basis:140px;
+  background:conic-gradient(#efb35f var(--score),rgba(255,255,255,.18) 0)
+}
+.readiness-big-dial:before{
+  background:#285738
+}
+.readiness-big-dial b{
+  color:white;
+  font-size:42px
+}
+.readiness-big-dial small{
+  color:#c6d9c3
+}
+.readiness-hero-card .morni-kicker{
+  color:#c0d8b7
+}
+.readiness-hero-card h2{
+  font-size:22px;
+  margin:8px 0
+}
+.readiness-hero-card p{
+  font-size:11px;
+  line-height:1.6;
+  color:rgba(255,255,255,.75);
+  max-width:570px
+}
+.readiness-signal-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:12px
+}
+.readiness-signal{
+  display:grid;
+  grid-template-columns:36px 1fr auto;
+  align-items:center;
+  gap:8px 12px;
+  padding:16px;
+  border-radius:16px;
+  background:var(--surface,var(--mori-cream));
+  border:1px solid var(--mori-line)
+}
+.readiness-signal>span{
+  width:34px;
+  height:34px;
+  border-radius:11px;
+  background:#edf4e9;
+  display:grid;
+  place-items:center;
+  color:#47764d;
+  font-size:18px
+}
+.readiness-signal>div{
+  min-width:0
+}
+.readiness-signal b{
+  display:block;
+  font-size:12px;
+  color:var(--text,var(--mori-ink))
+}
+.readiness-signal small{
+  display:block;
+  font-size:10px;
+  color:var(--mori-muted);
+  line-height:1.4;
+  margin-top:3px
+}
+.readiness-signal strong{
+  font-size:15px;
+  color:#397349
+}
+.readiness-signal .morni-meter{
+  grid-column:1/-1;
+  margin:0
+}
+.formula-panel{
+  margin-top:14px
+}
+.formula-panel h3{
+  font-size:18px;
+  color:var(--text,var(--mori-ink));
+  margin:9px 0
+}
+.formula-panel p{
+  font-size:11px;
+  color:var(--mori-muted);
+  line-height:1.6
+}
+.resource-panel{
+  display:grid;
+  grid-template-columns:190px 1fr;
+  gap:20px;
+  align-items:center
+}
+.resource-bottle{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:7px;
+  padding:20px;
+  border-radius:17px;
+  background:#f4f1e4
+}
+.resource-bottle>span{
+  font-size:55px
+}
+.resource-bottle b{
+  display:block;
+  font-size:24px;
+  color:#315b3d
+}
+.resource-bottle small{
+  font-size:10px;
+  color:#7b8c7c
+}
+.resource-details{
+  min-width:0
+}
+.resource-detail-top{
+  display:flex;
+  justify-content:space-between;
+  font-size:12px;
+  color:var(--text,var(--mori-ink))
+}
+.resource-details p{
+  font-size:11px;
+  color:var(--mori-muted)
+}
+.resource-details .morni-field{
+  max-width:250px
+}
+
+      .showcase-hero{
+  padding:32px;
+  border-radius:24px;
+  background:linear-gradient(115deg,#173e2b,#315f3c 65%,#d78e3d);
+  color:#fff
+}
+.showcase-hero h1{
+  margin:12px 0
+}
+.showcase-hero p{
+  font-size:13px;
+  line-height:1.7;
+  color:rgba(255,255,255,.8);
+  max-width:650px
+}
+.showcase-trust-tags{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:20px
+}
+.showcase-progress-head{
+  display:flex;
+  align-items:end;
+  justify-content:space-between;
+  margin:25px 0 12px
+}
+.showcase-progress-head h2{
+  font-size:21px;
+  color:var(--text,var(--mori-ink));
+  margin:5px 0
+}
+.showcase-progress-head>b{
+  font-size:11px;
+  color:var(--mori-muted)
+}
+.showcase-layout{
+  display:grid;
+  grid-template-columns:1.2fr .8fr;
+  gap:14px
+}
+.showcase-step-card{
+  padding:24px
+}
+.showcase-step-count{
+  font-size:9px;
+  letter-spacing:1.5px;
+  font-weight:900;
+  color:#b47d3d
+}
+.showcase-step-mark{
+  width:60px;
+  height:60px;
+  border-radius:18px;
+  background:#edf4e9;
+  display:grid;
+  place-items:center;
+  font-size:28px;
+  color:#3c7548;
+  margin:16px 0
+}
+.showcase-step-card h2{
+  font-size:24px;
+  color:var(--text,var(--mori-ink));
+  margin:6px 0
+}
+.showcase-step-card>p{
+  font-size:12px;
+  line-height:1.7;
+  color:var(--mori-muted)
+}
+.showcase-proof{
+  padding:14px;
+  border-radius:13px;
+  background:#f8f3e8;
+  margin-top:18px
+}
+.showcase-proof b{
+  display:block;
+  font-size:8px;
+  letter-spacing:1px;
+  color:#a47a40
+}
+.showcase-proof span{
+  display:block;
+  font-size:11px;
+  line-height:1.55;
+  color:#5e715f;
+  margin-top:5px
+}
+.showcase-controls{
+  display:flex;
+  flex-wrap:wrap;
+  gap:7px;
+  margin-top:20px
+}
+.showcase-controls .btn{
+  font-size:10px;
+  padding:9px 12px
+}
+.showcase-chapters{
+  padding:18px
+}
+.showcase-chapter{
+  width:100%;
+  display:flex;
+  align-items:center;
+  gap:11px;
+  padding:13px 7px;
+  border:0;
+  border-bottom:1px solid var(--mori-line);
+  background:transparent;
+  text-align:left;
+  cursor:pointer
+}
+.showcase-chapter:last-child{
+  border:0
+}
+.showcase-chapter>span{
+  width:30px;
+  height:30px;
+  border-radius:10px;
+  background:#f0f3e9;
+  display:grid;
+  place-items:center;
+  font-size:10px;
+  font-weight:900;
+  color:#527654
+}
+.showcase-chapter>div{
+  flex:1;
+  min-width:0
+}
+.showcase-chapter b{
+  display:block;
+  font-size:11px;
+  color:var(--text,var(--mori-ink))
+}
+.showcase-chapter small{
+  display:block;
+  font-size:9px;
+  color:var(--mori-muted);
+  margin-top:3px
+}
+.showcase-chapter em{
+  font-style:normal;
+  color:#a47a40
+}
+.chapter-active{
+  background:#f5f7ee;
+  border-radius:12px
+}
+.chapter-done>span{
+  background:#3d7849;
+  color:#fff
+}
+.showcase-honesty{
+  display:flex;
+  gap:13px;
+  padding:17px;
+  margin-top:14px;
+  border-radius:16px;
+  background:#fff5e6;
+  border:1px solid #f0dfc4
+}
+.showcase-honesty>span{
+  font-size:21px;
+  color:#a77838
+}
+.showcase-honesty b{
+  font-size:12px;
+  color:#805d30
+}
+.showcase-honesty p{
+  font-size:11px;
+  line-height:1.65;
+  color:#776b57;
+  margin:5px 0 0
+}
+.showcase-footer-actions{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin-top:15px
+}
+.focus-card{
+  text-align:center;
+  max-width:600px;
+  margin:0 auto;
+  padding:35px
+}
+.focus-orb{
+  width:120px;
+  height:120px;
+  margin:0 auto 15px;
+  border-radius:50%;
+  display:grid;
+  place-items:center;
+  background:radial-gradient(circle,#fff0d1,#e7f1e4);
+  font-size:40px;
+  color:#39734a
+}
+.focus-timer{
+  font-size:58px;
+  font-weight:850;
+  letter-spacing:-2px;
+  color:var(--text,var(--mori-ink))
+}
+.focus-card p{
+  font-size:12px;
+  color:var(--mori-muted)
+}
+.focus-controls{
+  display:flex;
+  justify-content:center;
+  gap:9px;
+  margin:18px
+}
+.focus-card>small{
+  font-size:10px;
+  color:var(--mori-muted)
+}
+
+      body[data-theme="dark"] .morni-glass-panel,body[data-theme="dark"] .feature-card,body[data-theme="dark"] .morni-score-card,body[data-theme="dark"] .morni-water-card,body[data-theme="dark"] .reward-item,body[data-theme="dark"] .readiness-signal{
+  background:var(--surface,#17251c);
+  color:var(--text,#eef2e9)
+}
+
+      body[data-theme="dark"] .morni-feature-nav button{
+  background:#17251c;
+  color:#eaf0e6
+}
+body[data-theme="dark"] .morni-feature-nav button.active{
+  background:#3a7548;
+  color:#fff
+}
+body[data-theme="dark"] .morni-nudge-card,body[data-theme="dark"] .showcase-proof,body[data-theme="dark"] .handwash-tip{
+  background:#263528
+}
+body[data-theme="dark"] .reward-feature-banner,body[data-theme="dark"] .reward-item-art,body[data-theme="dark"] .resource-bottle{
+  background:#263528
+}
+body[data-theme="dark"] .morni-score-card p,body[data-theme="dark"] .feature-card-copy small,body[data-theme="dark"] .morni-page-heading p{
+  color:#b3c1b1
+}
+
+      @keyframes morni-orbit{
+  to{
+  transform:rotate(360deg)
+}
+
+}
+
+      @media(max-width:900px){
+  .feature-card-grid,.reward-shop-grid{
+  grid-template-columns:repeat(2,minmax(0,1fr))
+}
+.handwash-workspace,.showcase-layout{
+  grid-template-columns:1fr
+}
+.morni-score-row{
+  grid-template-columns:1fr 1fr
+}
+.handwash-main-panel{
+  grid-template-columns:150px 1fr
+}
+.handwash-stage-visual{
+  width:145px;
+  height:145px
+}
+.planner-top-grid{
+  grid-template-columns:1fr 1fr
+}
+
+}
+
+      @media(max-width:650px){
+  .morni-home-launch{
+  align-items:flex-start;
+  flex-direction:column
+}
+.morni-home-launch .btn{
+  width:100%
+}
+.morni-command-hero{
+  padding:25px 20px;
+  min-height:300px
+}
+.morni-command-orb{
+  width:100px;
+  height:100px;
+  flex-basis:100px;
+  opacity:.8
+}
+.morni-command-orb:before{
+  inset:7px
+}
+.morni-command-orb:after{
+  inset:-7px
+}
+.orb-sun{
+  width:40px;
+  height:40px;
+  top:18px
+}
+.morni-command-orb span{
+  font-size:7px;
+  margin-top:52px
+}
+.morni-command-orb b{
+  font-size:8px
+}
+.morni-command-hero h1{
+  font-size:36px
+}
+.morni-hero-tags span{
+  font-size:8px
+}
+.morni-score-row,.morni-lower-grid,.planner-top-grid,.readiness-signal-grid{
+  grid-template-columns:1fr
+}
+.morni-score-card{
+  gap:13px
+}
+.score-dial{
+  width:90px;
+  height:90px;
+  flex-basis:90px
+}
+.score-dial b{
+  font-size:27px
+}
+.morni-nudge-card{
+  align-items:flex-start;
+  flex-wrap:wrap
+}
+.morni-nudge-card>div{
+  width:calc(100% - 60px)
+}
+.morni-nudge-card .btn{
+  margin-left:56px
+}
+.feature-card-grid,.reward-shop-grid{
+  grid-template-columns:1fr 1fr
+}
+.feature-card{
+  padding:13px;
+  gap:9px;
+  min-height:145px
+}
+.feature-card-icon{
+  width:34px;
+  height:34px;
+  flex-basis:34px;
+  font-size:18px
+}
+.feature-card-copy b{
+  font-size:12px
+}
+.feature-card-copy small{
+  font-size:10px
+}
+.morni-page-heading{
+  align-items:flex-start;
+  flex-direction:column;
+  gap:8px
+}
+.morni-page-heading h1{
+  font-size:39px
+}
+.morni-live-label{
+  white-space:normal
+}
+.handwash-main-panel{
+  grid-template-columns:1fr;
+  text-align:center
+}
+.handwash-stage-visual{
+  margin:auto
+}
+.handwash-current{
+  padding:0 5px
+}
+.handwash-timer-wrap{
+  grid-column:1
+}
+.handwash-controls{
+  grid-column:1;
+  flex-wrap:wrap
+}
+.add-task-panel{
+  align-items:stretch;
+  flex-direction:column
+}
+.add-task-fields{
+  display:grid;
+  grid-template-columns:1fr 70px
+}
+.add-task-fields input:first-child{
+  width:100%;
+  grid-column:1/-1
+}
+.add-task-fields input:nth-child(2){
+  width:100%
+}
+.add-task-fields .btn{
+  grid-column:1/-1
+}
+.readiness-hero-card{
+  align-items:flex-start;
+  flex-direction:column
+}
+.resource-panel{
+  grid-template-columns:1fr
+}
+.resource-bottle{
+  flex-direction:row;
+  justify-content:center
+}
+.showcase-hero{
+  padding:23px
+}
+.showcase-hero h1{
+  font-size:37px
+}
+.showcase-controls .btn{
+  flex:1
+}
+.points-wallet{
+  width:100%
+}
+.morni-feature-nav{
+  margin-inline:-3px
+}
+.morni-nav-label{
+  display:none
+}
+
+}
+
+      @media(max-width:390px){
+  .feature-card-grid,.reward-shop-grid{
+  grid-template-columns:1fr
+}
+.morni-command-orb{
+  display:none
+}
+.morni-command-hero{
+  min-height:0
+}
+.morni-score-card{
+  align-items:flex-start;
+  flex-direction:column
+}
+.morni-score-row{
+  gap:9px
+}
+.morni-section-heading{
+  align-items:flex-start;
+  flex-direction:column
+}
+.morni-nudge-card .btn{
+  margin-left:0
+}
+.showcase-controls{
+  display:grid;
+  grid-template-columns:1fr 1fr
+}
+.showcase-controls .btn:nth-child(2){
+  grid-column:1/-1;
+  grid-row:1
+}
+
+}
+
+      @media(prefers-reduced-motion:reduce){
+  .handwash-glow{
+  animation:none!important
+}
+.feature-card,.morni-feature-nav button{
+  transition:none!important
+}
+
+}
+
+    
+
+/* Hardware-independent presentation note */
+.morni-software-demo-note{display:flex;align-items:center;gap:13px;padding:15px 18px;margin:14px 0;border:1px solid rgba(71,119,74,.2);border-radius:16px;background:linear-gradient(105deg,#edf5e5,#fff3df);color:#244d35}
+.morni-demo-note-icon{display:grid;place-items:center;width:36px;height:36px;flex:none;border-radius:12px;background:#dcebbd;color:#315b3d;font-size:18px}
+.morni-software-demo-note>div{flex:1;min-width:0}
+.morni-software-demo-note b{display:block;color:#244d35;font-size:12px}
+.morni-software-demo-note p{margin:4px 0 0;color:#617465;font-size:10px;line-height:1.55}
+body[data-theme="dark"] .morni-software-demo-note{background:#263528;border-color:#425746}
+body[data-theme="dark"] .morni-software-demo-note b{color:#edf4e8}
+body[data-theme="dark"] .morni-software-demo-note p{color:#b3c1b1}
+@media(max-width:650px){.morni-software-demo-note{align-items:flex-start;flex-wrap:wrap}.morni-software-demo-note .btn{width:100%}}
+/* MORNI readability and profile polish */
+#pageContent .morni-profile-button{
+  margin-left:auto;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:6px 12px 6px 7px;
+  border-radius:999px;
+  border:1px solid var(--mori-line);
+  background:var(--surface,#f7f5eb);
+  color:var(--text,#193b2a);
+  font-weight:800;
+}
+#pageContent .morni-profile-button.active{background:#244d35;color:#fff}
+.morni-profile-avatar,.profile-summary-avatar,.profile-avatar-large{
+  display:grid;place-items:center;border-radius:50%;font-weight:900;
+  background:linear-gradient(145deg,#d8edaa,#f2c27c);color:#244d35;
+}
+.morni-profile-avatar{width:27px;height:27px;font-size:12px}
+.profile-avatar-large{width:76px;height:76px;font-size:30px;flex:none}
+.profile-summary-card{display:flex;align-items:center;gap:16px;padding:22px;margin:14px 0}
+.profile-summary-avatar{width:58px;height:58px;font-size:23px;flex:none}
+.profile-summary-copy{flex:1;min-width:0}
+.profile-summary-copy h2{margin:4px 0;color:var(--text,#193b2a)}
+.profile-summary-copy p{margin:0;color:var(--muted,#718174);font-size:12px}
+.profile-level{padding:10px 17px;border-radius:13px;background:#e8f0dc;color:#244d35;text-align:center}
+.profile-level small,.profile-stat-grid article>span{display:block;font-size:9px;letter-spacing:1px;font-weight:900}
+.profile-level b{font-size:25px}
+.profile-stat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:14px 0}
+.profile-stat-grid article{padding:17px}
+.profile-stat-grid article>span{color:var(--mori-muted)}
+.profile-stat-grid article>b{display:block;font-size:25px;color:var(--text,#193b2a);margin:8px 0}
+.profile-stat-grid article>small{color:var(--muted,#718174);font-size:10px}
+.profile-edit-card{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:20px}
+.profile-edit-card>div{grid-column:1/-1}
+.profile-edit-card h2{margin:4px 0;color:var(--text,#193b2a)}
+.profile-edit-card p{margin:0;color:var(--muted,#718174);font-size:12px}
+.profile-edit-card .btn{align-self:end}
+.profile-shortcuts{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+/* Correct legacy white-on-white and white-on-cream text combinations. */
+#pageContent .morni-glass-panel,
+#pageContent .feature-card,
+#pageContent .reward-item,
+#pageContent .readiness-signal,
+#pageContent .planner-task-row,
+#pageContent .morni-score-card,
+#pageContent .morni-water-card{
+  color:var(--text,#193b2a);
+}
+#pageContent .morni-glass-panel :is(h1,h2,h3,h4,b,strong,label),
+#pageContent .feature-card-copy b,
+#pageContent .reward-item-copy h3{
+  color:var(--text,#193b2a);
+}
+#pageContent .morni-glass-panel :is(p,small,.muted),
+#pageContent .feature-card-copy small,
+#pageContent .reward-item-copy p{
+  color:var(--muted,#66796a);
+}
+#pageContent input:not([type="checkbox"]),
+#pageContent select,
+#pageContent textarea{
+  background:var(--input-bg,#fffdf7);
+  color:var(--text,#193b2a);
+  border-color:var(--line,var(--mori-line));
+}
+#pageContent input::placeholder,
+#pageContent textarea::placeholder{color:#718174;opacity:1}
+#pageContent .morni-home-launch,
+#pageContent .morni-home-launch *{color:#244d35}
+#pageContent .morni-home-launch small{color:#647568}
+body[data-theme="dark"] #pageContent .morni-glass-panel,
+body[data-theme="dark"] #pageContent .feature-card,
+body[data-theme="dark"] #pageContent .reward-item,
+body[data-theme="dark"] #pageContent .readiness-signal,
+body[data-theme="dark"] #pageContent .planner-task-row{
+  background:var(--surface,#17251c);color:var(--text,#eef2e9);
+}
+body[data-theme="dark"] #pageContent .morni-glass-panel :is(h1,h2,h3,h4,b,strong,label),
+body[data-theme="dark"] #pageContent .feature-card-copy b,
+body[data-theme="dark"] #pageContent .reward-item-copy h3,
+body[data-theme="dark"] #pageContent .profile-summary-copy h2{
+  color:var(--text,#eef2e9);
+}
+body[data-theme="dark"] #pageContent .morni-glass-panel :is(p,small),
+body[data-theme="dark"] #pageContent .feature-card-copy small,
+body[data-theme="dark"] #pageContent .reward-item-copy p{
+  color:var(--muted,#b3c1b1);
+}
+body[data-theme="dark"] #pageContent .morni-home-launch{background:#263528;border-color:#3a4b3a}
+body[data-theme="dark"] #pageContent .morni-home-launch *{color:#edf4e8}
+body[data-theme="dark"] #pageContent input:not([type="checkbox"]),
+body[data-theme="dark"] #pageContent select,
+body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;border-color:#425746}
+@media(max-width:650px){
+  .profile-stat-grid{grid-template-columns:1fr}
+  .profile-edit-card{grid-template-columns:1fr}
+  .profile-edit-card>div{grid-column:auto}
+  .profile-summary-card{flex-wrap:wrap}
+  .profile-level{margin-left:auto}
+  .morni-profile-label{display:none}
+}
+\n    `;
+    const style=document.createElement("style");style.id="morni-ultimate-styles";style.textContent=css;document.head.appendChild(style);
+  }
+
+  /* ---------------------------------------------------------
+     PAGE RENDERING AND NAVIGATION
+     --------------------------------------------------------- */
+
+  function profilePage() {
+    const firstName = safe((state.profile.name || "MORNI User").trim());
+    const equipped = rewardCatalog.find(item => item.id === extra.rewards.equipped) || rewardCatalog[0];
+    const earned = (state.history || []).length;
+    return `<div class="page-enter morni-feature-page morni-profile-page">
+      <div class="morni-page-heading">
+        <div><span class="morni-kicker">YOUR MORNI IDENTITY</span><h1>Your profile<span class="title-period">.</span></h1><p>Manage your MORNI name, morning preferences and personal progress.</p></div>
+        <div class="profile-avatar-large">${safe((state.profile.name || "M").trim().charAt(0).toUpperCase())}</div>
+      </div>
+      <section class="morni-glass-panel profile-summary-card">
+        <div class="profile-summary-avatar">${safe((state.profile.name || "M").trim().charAt(0).toUpperCase())}</div>
+        <div class="profile-summary-copy"><span class="morni-kicker">MORNI MEMBER</span><h2>${firstName}</h2><p>Current collectible: ${equipped.icon} ${safe(equipped.name)}</p></div>
+        <div class="profile-level"><small>LEVEL</small><b>${level()}</b></div>
+      </section>
+      <div class="profile-stat-grid">
+        <article class="morni-glass-panel"><span>POINTS BALANCE</span><b>✧ ${xp.points}</b><small>Earn points through routine milestones</small></article>
+        <article class="morni-glass-panel"><span>ROUTINE STREAK</span><b>${Number(state.streak) || 0} days</b><small>Consistency builds over time</small></article>
+        <article class="morni-glass-panel"><span>RECORDED SESSIONS</span><b>${earned}</b><small>Saved activity on this browser</small></article>
+      </div>
+      <section class="morni-glass-panel profile-edit-card">
+        <div><span class="morni-kicker">PERSONAL DETAILS</span><h2>Profile settings</h2><p>Your details are stored locally in this browser.</p></div>
+        <label class="morni-field">Display name<input id="profileName" maxlength="32" value="${safe(state.profile.name)}"></label>
+        <label class="morni-field">Usual wake-up time<input id="wakeTime" type="time" value="${safe(state.profile.wakeTime)}"></label>
+        <button class="btn btn-primary" data-action="save-profile">Save profile</button>
+      </section>
+      <div class="profile-shortcuts">
+        <button class="btn btn-soft" data-page="rewards">✧ Open rewards shop</button>
+        <button class="btn btn-soft" data-page="settings">⚙ Open settings</button>
+      </div>
+      <p class="morni-disclaimer">MORNI profile and progress are saved on this device. They are not an online account and will not automatically sync between devices.</p>
+    </div>`;
+  }
+
+  const pages = {
+    home,
+    routine,
+    device,
+    school,
+    insights,
+    settings,
+    lab,
+    handwash: handwashPage,
+    planner: plannerPage,
+    rewards: rewardsPage,
+    impact: impactPage,
+    showcase: showcasePage,
+    focus: focusPage,
+    profile: profilePage
+  };
+
+  function render() {
+    const root = $("#pageContent");
+    if (!root) return;
+
+    injectUltimateStyles();
+    root.innerHTML = featureNav() + (pages[page] || home)();
+
+    $$('[data-page="overview"]').forEach(element => {
+      element.dataset.page = "home";
+      element.setAttribute("aria-label", "Home");
+      const textNode = Array.from(element.childNodes).find(node => node.nodeType === 3 && node.textContent.trim());
+      if (textNode) textNode.textContent = " Home ";
+      else if (!element.querySelector("svg, img, i")) element.textContent = "Home";
+    });
+
+    document.body.dataset.theme = state.theme;
+
+    const breadcrumb = $("#breadcrumb");
+
+    if (breadcrumb) {
+      breadcrumb.textContent =
+        `Workspace / ${page[0].toUpperCase()}${page.slice(1)}`;
+    }
+
+    $$("[data-page]").forEach(element => {
+      element.classList.toggle(
+        "active",
+        element.dataset.page === page
+      );
+    });
+
+    updateConnection();
+
+    if (state.timer.running) {
+      startTimerLoop();
+    }
+  }
+
+  function refreshLiveBits() {
+    updateConnection();
+  }
+
+  function navigate(next) {
+    if (!pages[next]) return;
+
+    page = next;
+    render();
+
+    window.scrollTo({
+      top: 0,
+      behavior: "smooth"
+    });
+  }
+
+  /* ---------------------------------------------------------
+     SAVE CONNECTION SETTINGS
+     --------------------------------------------------------- */
+
+  async function saveConnectionFromForm() {
+    const selectedMode = $("#connectionMode")?.value || "demo";
+    const address = ($("#deviceAddress")?.value || "").trim().replace(/\/+$/, "");
+
+    if (!["demo", "live"].includes(selectedMode)) {
+      toast("Choose a valid connection mode.");
+      return;
+    }
+
+    if (selectedMode === "live" && !validDeviceAddress(address)) {
+      toast("Enter a valid ESP8266 address, such as http://192.168.0.196");
+      return;
+    }
+
+    connectionMode = selectedMode;
+
+    if (address) {
+      deviceBaseUrl = address;
+    }
+
+    saveConnectionSettings();
+
+    state.device.online = false;
+    state.device.hardwareReady = false;
+    state.device.lastError = "";
+    state.device.mode = isDemoMode() ? "demo" : "not checked";
+    state.device.ip = isDemoMode() ? "Demo mode" : deviceBaseUrl;
+
+    save();
+    render();
+
+    if (isDemoMode()) {
+      toast("Demo mode saved. Physical device will not be contacted.");
+      return;
+    }
+
+    toast("Live settings saved. Checking ESP8266...");
+    await pollDevice();
+
+    if (state.device.online) {
+      toast(
+        state.device.hardwareReady
+          ? "ESP8266 connected. Firmware reports hardware ready."
+          : "ESP8266 reachable. Hardware is not yet confirmed ready."
+      );
+    } else {
+      toast("Settings saved, but the ESP8266 could not be reached.");
+    }
+  }
+
+  /* ---------------------------------------------------------
+     EVENT HANDLERS
+     --------------------------------------------------------- */
+
+  function bindEvents() {
+    document.addEventListener("click", event => {
+      const nav = event.target.closest("[data-page]");
+
+      if (nav) {
+        event.preventDefault();
+        navigate(nav.dataset.page === "overview" ? "home" : nav.dataset.page);
+        return;
+      }
+
+      const extraActionElement = event.target.closest("[data-extra-action]");
+      if (extraActionElement) {
+        event.preventDefault();
+        handleExtraAction(extraActionElement.dataset.extraAction, extraActionElement);
+        return;
+      }
+
+      const actionElement = event.target.closest("[data-action]");
+      const action = actionElement?.dataset.action;
+
+      if (!action) return;
+
+      if (action === "start-routine") {
+        startRoutine("dashboard");
+      }
+
+      if (action === "timer-start") {
+        timerStart();
+      }
+
+      if (action === "timer-pause") {
+        timerPause();
+      }
+
+      if (action === "timer-reset") {
+        timerReset();
+      }
+
+      if (action === "check-device") {
+        pollDevice().then(() => {
+          toast(
+            state.device.online
+              ? "Station is reachable."
+              : "Station is offline."
+          );
+        });
+      }
+
+      if (action === "save-connection") {
+        saveConnectionFromForm();
+      }
+
+      if (action === "save-profile") {
+        state.profile.name =
+          $("#profileName")?.value.trim() || "MORNI User";
+
+        state.profile.wakeTime =
+          $("#wakeTime")?.value || "06:30";
+
+        save();
+        render();
+        toast("Preferences saved.");
+      }
+
+      if (action === "save-refill") {
+        state.capacity.handwash = Math.max(
+          1,
+          Number($("#capacity")?.value) || 250
+        );
+
+        state.average.handwash = Math.max(
+          0.1,
+          Number($("#average")?.value) || 2
+        );
+
+        save();
+        render();
+        toast("Refill estimate saved.");
+      }
+
+      if (action === "theme") {
+        state.theme = state.theme === "light" ? "dark" : "light";
+        save();
+        render();
+      }
+
+      if (action === "demo-start") {
+        simulateEvent("start");
+      }
+
+      if (action === "demo-brush") {
+        simulateEvent("toothbrush");
+      }
+
+      if (action === "demo-handwash") {
+        simulateEvent("handwash");
+      }
+
+      if (action === "demo-complete-brush") {
+        simulateEvent("completeBrush");
+      }
+
+      if (action === "reset") {
+        if (confirm("Reset all MORNI data saved in this browser?")) {
+          localStorage.removeItem(STORE);
+          localStorage.removeItem(XP_STORE);
+
+          state = defaultState();
+
+          xp = {
+            points: 0,
+            unlocked: [],
+            missionDate: today(),
+            missions: [],
+            fullDays: 0
+          };
+
+          save();
+          render();
+          toast("Local MORNI data reset.");
+        }
+      }
+    });
+
+    document.addEventListener("change", event => {
+      const extraCheckbox = event.target.closest("[data-extra-check]");
+      if (extraCheckbox) {
+        const task = extra.plan.tasks.find(item => item.id === extraCheckbox.dataset.extraCheck);
+        if (task) { task.done = extraCheckbox.checked; saveExtra(); render(); }
+      }
+
+      const checkbox = event.target.closest("[data-check]");
+
+      if (checkbox) {
+        toggleChecklist(checkbox.dataset.check);
+      }
+    });
+  }
+
+  /* ---------------------------------------------------------
+     INITIALISATION AND CLEANUP
+     --------------------------------------------------------- */
+
+  function init() {
+    document.body.dataset.theme = state.theme;
+
+    bindEvents();
+
+    const themeButton = $("#themeBtn");
+
+    if (themeButton) {
+      themeButton.addEventListener("click", () => {
+        state.theme = state.theme === "light" ? "dark" : "light";
+        save();
+        render();
+      });
+    }
+
+    render();
+
+    if (state.timer.running) {
+      startTimerLoop();
+    }
+
+    if (extra.handwash.running) {
+      if (handwashElapsed() <= 0) completeHandwashGuide();
+      else {
+        extra.handwash.endsAt = Date.now() + extra.handwash.remaining * 1000;
+        handwashLoop = setInterval(tickHandwashGuide, 200);
+      }
+    }
+
+    if (extra.focus.running) {
+      extra.focus.endsAt = Date.now() + extra.focus.remaining * 1000;
+      focusLoop = setInterval(tickFocus, 250);
+    }
+
+    if (isDemoMode()) {
+      updateConnection();
+    } else {
+      pollDevice();
+    }
+
+    pollLoop = setInterval(
+      pollDevice,
+      Number(CFG.heartbeatInterval || 5000)
+    );
+
+    window.addEventListener("beforeunload", () => {
+      clearInterval(timerLoop);
+      clearInterval(pollLoop);
+      clearInterval(handwashLoop);
+      clearInterval(focusLoop);
+      clearTimeout(toastLoop);
+      clearTimeout(featureToastLoop);
+    });
+  }
+
+  /* ---------------------------------------------------------
+     PUBLIC APP API
+     --------------------------------------------------------- */
+
+  window.showPage = navigate;
+  window.navigate = navigate;
+
+  window.completeRoutineStep = id => {
+    if (id === "handwash") {
+      return markHandwash("app");
+    }
+
+    if (id === "brush" || id === "toothbrush") {
+      return completeBrush("app");
+    }
+
+    return null;
+  };
+
+  window.MORNI_EXPERIENCE = {
+    open: navigate,
+    getReadiness: readinessBreakdown,
+    getHandwashStages: () => handwashStages.map(stage => ({ ...stage })),
+    getRewards: () => rewardCatalog.map(item => ({ ...item, owned: extra.rewards.owned.includes(item.id), equipped: extra.rewards.equipped === item.id })),
+    getPlan: () => JSON.parse(JSON.stringify(extra.plan)),
+    getHardwareStatus: () => ({ online: state.device.online, hardwareReady: state.device.hardwareReady, mode: state.device.mode }),
+    exportData: exportMorniData
+  };
+
+  window.MORNI_PLUS = {
+    complete: window.completeRoutineStep,
+
+    getStats: () => ({
+      xp: xp.points,
+      level: level(),
+      streak: state.streak,
+      bestStreak: state.bestStreak,
+      completed: completed(),
+      score: progress()
+    }),
+
+    getMissions: () => missions.map(mission => ({
+      id: mission.id,
+      title: mission.title,
+      description: mission.desc,
+      completed: mission.test()
+    })),
+
+    getAchievements: () => achievements.map(item => ({
+      id: item[0],
+      name: item[1],
+      description: item[2],
+      unlocked: xp.unlocked.includes(item[0])
+    })),
+
+    getWeeklyStats: () => state.history.slice(-7),
+
+    getCoachMessage: coach,
+
+    refresh: render,
+
+    resetToday: () => {
+      state.routine = { ...defaultState().routine };
+      state.timer = { ...defaultState().timer };
+      state.date = today();
+      state.startTime = null;
+
+      save();
+      render();
+    }
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+
+})();
+
+
+/* =========================================================
+   MORNI RESPONSIVE + SUNRISE BRANDING
+   ========================================================= */
+
+(() => {
+  "use strict";
+
+  const LOGO = "./logo.svg";
+  const MANIFEST = "./manifest.json";
+
+  function setLink(rel, href, type) {
+    let link = document.querySelector(`link[rel="${rel}"]`);
+
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = rel;
+      document.head.appendChild(link);
+    }
+
+    link.href = href;
+
+    if (type) {
+      link.type = type;
+    }
+  }
+
+  function updateBranding() {
+    setLink("icon", LOGO, "image/svg+xml");
+    setLink("apple-touch-icon", LOGO);
+    setLink("manifest", MANIFEST);
+
+    let theme = document.querySelector('meta[name="theme-color"]');
+
+    if (!theme) {
+      theme = document.createElement("meta");
+      theme.name = "theme-color";
+      document.head.appendChild(theme);
+    }
+
+    theme.content = "#173d2b";
+    document.title = "MORNI | Smart Morning Ecosystem";
+
+    document.querySelectorAll(
+      ".brand-icon img, .mobile-brand img, .hub-ring img, img[src$='icon.svg']"
+    ).forEach(img => {
+      img.src = LOGO;
+      img.alt = "MORNI sunrise logo";
+    });
+  }
+
+  updateBranding();
+
+  const logoObserver = new MutationObserver(() => {
+    updateBranding();
+  });
+
+  if (document.body) {
+    logoObserver.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  const responsiveCSS = `
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      width: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
+    }
+
+    body {
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+    }
+
+    img, svg, video, canvas {
+      max-width: 100%;
+    }
+
+    button, input, select, textarea {
+      max-width: 100%;
+      touch-action: manipulation;
+    }
+
+    button {
+      min-height: 40px;
+    }
+
+    .app-shell, .main, .page-content, .page-enter,
+    .panel, .welcome-hero, .dashboard-grid > *,
+    .device-hero-grid > *, .routine-layout > *,
+    .school-layout > *, .settings-layout > * {
+      min-width: 0;
+    }
+
+    .page-content {
+      width: 100%;
+      max-width: 1600px;
+      margin-inline: auto;
+    }
+
+    .panel {
+      overflow-wrap: anywhere;
+    }
+
+    .brand-icon img, .mobile-brand img, .hub-ring img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .brand-icon {
+      overflow: hidden;
+    }
+
+    @media (min-width: 761px) and (max-width: 1050px) {
+      .sidebar {
+        width: 205px;
+        padding-inline: 13px;
+      }
+
+      .main {
+        margin-left: 205px;
+        width: calc(100% - 205px);
+      }
+
+      .dashboard-grid,
+      .device-hero-grid,
+      .routine-layout,
+      .school-layout,
+      .settings-layout,
+      .insight-layout {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .welcome-hero {
+        padding-right: 190px;
+      }
+
+      .hero-art {
+        transform: translateY(-50%) scale(.62);
+        transform-origin: right center;
+      }
+
+      .panel {
+        padding: 18px;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .sidebar {
+        display: none !important;
+      }
+
+      .main {
+        margin: 0 !important;
+        width: 100% !important;
+        min-width: 0;
+      }
+
+      .topbar {
+        height: 60px;
+        padding: 0 13px;
+        gap: 8px;
+      }
+
+      .mobile-brand {
+        display: flex !important;
+        align-items: center;
+        gap: 8px;
+        flex-shrink: 0;
+        font-size: 17px;
+      }
+
+      .mobile-brand img {
+        width: 30px;
+        height: 30px;
+        border-radius: 9px;
+      }
+
+      .breadcrumb {
+        display: none !important;
+      }
+
+      .top-actions {
+        margin-left: auto;
+        gap: 7px;
+      }
+
+      .mode-pill {
+        font-size: 7px;
+        padding: 6px 8px;
+        white-space: nowrap;
+      }
+
+      .page-content {
+        width: 100%;
+        padding: 16px 13px calc(100px + env(safe-area-inset-bottom));
+      }
+
+      .dashboard-grid,
+      .dashboard-side,
+      .device-hero-grid,
+      .routine-layout,
+      .school-layout,
+      .settings-layout,
+      .insight-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) !important;
+        gap: 13px;
+      }
+
+      .dashboard-side {
+        display: grid;
+      }
+
+      .panel {
+        width: 100%;
+        padding: 16px;
+        border-radius: 17px;
+      }
+
+      .page-title-row {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .page-title-row h1 {
+        font-size: clamp(30px, 8vw, 40px);
+        overflow-wrap: anywhere;
+      }
+
+      .welcome-hero {
+        min-height: 370px;
+        padding: 22px 17px;
+        overflow: hidden;
+      }
+
+      .hero-copy {
+        width: 100%;
+        max-width: 100%;
+        position: relative;
+        z-index: 2;
+      }
+
+      .welcome-hero h1 {
+        font-size: clamp(36px, 10vw, 48px);
+        overflow-wrap: anywhere;
+      }
+
+      .welcome-hero p {
+        max-width: 100%;
+        line-height: 1.7;
+      }
+
+      .hero-art {
+        right: -22px;
+        top: auto;
+        bottom: -38px;
+        transform: scale(.55);
+        transform-origin: bottom right;
+        opacity: .42;
+      }
+
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px;
+      }
+
+      .hero-actions .btn {
+        min-height: 44px;
+      }
+
+      .metric-strip {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 9px;
+      }
+
+      .metric {
+        min-width: 0;
+        padding: 12px 9px;
+        gap: 7px;
+      }
+
+      .metric b {
+        font-size: clamp(17px, 5vw, 22px);
+      }
+
+      .metric small {
+        font-size: 8px;
+      }
+
+      .metric span:last-child {
+        overflow-wrap: anywhere;
+      }
+
+      .mobile-nav {
+        display: flex !important;
+        position: fixed;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        z-index: 100;
+        min-height: 62px;
+        padding: 7px 3px calc(7px + env(safe-area-inset-bottom));
+        justify-content: space-around;
+        background: color-mix(in srgb, var(--surface) 96%, transparent);
+        border-top: 1px solid var(--line);
+        backdrop-filter: blur(16px);
+      }
+
+      .mobile-nav button {
+        min-width: 0;
+        min-height: 45px;
+        padding: 3px 1px;
+        flex: 1;
+        display: grid;
+        justify-items: center;
+        align-content: center;
+        gap: 3px;
+        font-size: 9px;
+        white-space: nowrap;
+      }
+
+      .mobile-nav button span {
+        font-size: 18px;
+      }
+
+      .station-stage {
+        width: 100%;
+        height: clamp(250px, 70vw, 310px);
+        overflow: hidden;
+      }
+
+      .station-illustration {
+        min-width: 0;
+        width: min(235px, 88%);
+        transform: translate(-50%, -48%) scale(.9);
+      }
+
+      .station-hardware {
+        gap: 5px;
+      }
+
+      .station-base {
+        font-size: 7px;
+      }
+
+      .component-row {
+        flex-wrap: wrap;
+        gap: 9px;
+      }
+
+      .component-row > div {
+        min-width: 0;
+      }
+
+      .component-row small,
+      .component-row b {
+        overflow-wrap: anywhere;
+      }
+
+      .field-input,
+      input,
+      select,
+      textarea {
+        width: 100%;
+        min-height: 44px;
+        font-size: 16px !important;
+      }
+
+      .achievement-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .toast {
+        left: 12px;
+        right: 12px;
+        bottom: calc(78px + env(safe-area-inset-bottom));
+        text-align: center;
+      }
+
+      .setting-row {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .setting-row button {
+        width: 100%;
+      }
+    }
+
+    @media (max-width: 390px) {
+      .page-content {
+        padding-left: 10px;
+        padding-right: 10px;
+      }
+
+      .topbar {
+        padding-inline: 9px;
+      }
+
+      .top-actions {
+        gap: 5px;
+      }
+
+      .top-actions .avatar {
+        display: none;
+      }
+
+      .metric-strip,
+      .achievement-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+
+      .metric {
+        display: flex;
+      }
+
+      .welcome-hero {
+        min-height: 390px;
+        padding: 18px 14px;
+      }
+
+      .station-illustration {
+        transform: translate(-50%, -48%) scale(.82);
+      }
+
+      .mobile-nav button {
+        font-size: 8px;
+      }
+    }
+
+    @media (max-width: 900px) and (orientation: landscape) {
+      .welcome-hero {
+        min-height: 300px;
+      }
+
+      .mobile-nav {
+        min-height: 52px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        scroll-behavior: auto !important;
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+      }
+    }
+  `;
+
+  const style = document.createElement("style");
+  style.id = "morni-responsive-addon";
+  style.textContent = responsiveCSS;
+  document.head.appendChild(style);
+
+  console.info("MORNI responsive and sunrise branding loaded.");
+
+})();

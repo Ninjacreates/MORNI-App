@@ -1,0 +1,107 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#10251c">
+  <meta name="description" content="MORNI — Your smart morning routine ecosystem.">
+
+  <title>MORNI | Smart Morning Ecosystem</title>
+
+  <!-- App icons -->
+  <link rel="icon" type="image/svg+xml" href="./logo.svg">
+  <link rel="apple-touch-icon" href="./logo.svg">
+  <link rel="manifest" href="./manifest.json">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <!-- Main stylesheet -->
+  <link rel="stylesheet" href="./style.css">
+</head>
+
+<body>
+  <div class="app-shell">
+
+    <aside class="sidebar">
+      <a class="brand" href="#" onclick="showPage('home');return false">
+        <div class="brand-icon">
+          <img src="./logo.svg" alt="MORNI sunrise logo">
+        </div>
+        <div>
+          <strong>MORNI</strong>
+          <small>SMART MORNING</small>
+        </div>
+      </a>
+
+      <div class="side-label">WORKSPACE</div>
+
+      <nav class="side-nav">
+        <button class="nav-btn active" data-page="home"><span>⌂</span> Overview</button>
+        <button class="nav-btn" data-page="routine"><span>◷</span> My Routine</button>
+        <button class="nav-btn" data-page="device"><span>⌘</span> Device Control</button>
+        <button class="nav-btn" data-page="school"><span>▤</span> School Prep</button>
+        <button class="nav-btn" data-page="insights"><span>▥</span> Insights</button>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="connection-mini">
+          <span class="status-dot" id="sideDot"></span>
+          <div>
+            <strong id="sideConnection">Simulation mode</strong>
+            <small id="sideIp">Virtual device</small>
+          </div>
+        </div>
+
+        <button class="nav-btn" data-page="settings">
+          <span>⚙</span> Settings
+        </button>
+
+        <div class="side-footer">
+          MORNI v2.0 · Built for better mornings
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+
+      <header class="topbar">
+        <button class="mobile-brand" onclick="showPage('home')">
+          <img src="./logo.svg" alt="">
+          MORNI
+        </button>
+
+        <div class="breadcrumb" id="breadcrumb">
+          Workspace / Overview
+        </div>
+
+        <div class="top-actions">
+          <span class="mode-pill" id="modePill">DEMO MODE</span>
+          <button class="icon-btn" id="themeBtn" title="Toggle theme">☾</button>
+          <div class="avatar" id="avatar">M</div>
+        </div>
+      </header>
+
+      <div id="pageContent" class="page-content"></div>
+
+      <footer class="mobile-nav">
+        <button data-page="home" class="active"><span>⌂</span>Home</button>
+        <button data-page="routine"><span>◷</span>Routine</button>
+        <button data-page="device"><span>⌘</span>Device</button>
+        <button data-page="school"><span>▤</span>School</button>
+        <button data-page="settings"><span>⚙</span>Settings</button>
+      </footer>
+
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- Keep this order: config.js first, app.js second -->
+  <script src="./config.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
