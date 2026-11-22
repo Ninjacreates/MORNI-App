@@ -5651,15 +5651,15 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
 
 /* ============================================================
-   MORNI CONNECTED SERVICES — NATIVE PAGE EXTENSION
-   Gmail + Meeting Assistant + Maps + Weather + Local News
-   Paste below the original MORNI app and dark-mode patch.
+   MORNI CONNECTED SERVICES — PREMIUM EDITION
+   Gmail + Smart Meetings + Google Maps + Weather + News
+   Replace the previous Services extensions with this block.
    ============================================================ */
 
 (() => {
   "use strict";
 
-  const GOOGLE_CLIENT_ID =
+  const CLIENT_ID =
     "367611240198-lukr25vboivbmgcodmpeb6lhibeje432.apps.googleusercontent.com";
 
   const GMAIL_SCOPE =
@@ -5667,68 +5667,70 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
   const root = document.getElementById("pageContent");
   const sidebar = document.querySelector(".side-nav");
-  const mobileNav = document.querySelector(".mobile-nav");
 
   if (!root || !sidebar) {
-    console.error("MORNI Services: required app navigation was not found.");
+    console.error("MORNI Services: app navigation not found.");
     return;
   }
 
-  // Remove elements from the previous popup version, if present.
+  // Remove any old Services elements.
   document.getElementById("morni-services-button")?.remove();
   document.getElementById("morni-services-overlay")?.remove();
   document.getElementById("morni-services-panel")?.remove();
+
+  document.getElementById("morni-connected-services-styles")?.remove();
+
+  const STORE = "morni_meeting_events_v1";
 
   let gmailToken = null;
   let tokenClient = null;
   let gmailPolling = null;
   let previousMailIds = new Set();
   let userLocation = null;
-  let currentPage = false;
-
-  const EVENT_STORE = "morni_meeting_events_v1";
-
-  function readEvents() {
-    try {
-      const data = JSON.parse(localStorage.getItem(EVENT_STORE) || "[]");
-      return Array.isArray(data) ? data : [];
-    } catch {
-      return [];
-    }
-  }
-
-  function saveEvents(events) {
-    localStorage.setItem(EVENT_STORE, JSON.stringify(events));
-  }
+  let servicesOpen = false;
 
   let meetings = readEvents();
 
   const escapeHTML = value =>
-    String(value ?? "").replace(/[&<>"']/g, char => ({
+    String(value ?? "").replace(/[&<>"']/g, c => ({
       "&": "&amp;",
       "<": "&lt;",
       ">": "&gt;",
       '"': "&quot;",
       "'": "&#39;"
-    })[char]);
+    })[c]);
 
-  function notify(text) {
+  function readEvents() {
+    try {
+      const value = JSON.parse(localStorage.getItem(STORE) || "[]");
+      return Array.isArray(value) ? value : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveEvents(value) {
+    meetings = value;
+    localStorage.setItem(STORE, JSON.stringify(value));
+  }
+
+  function notify(message) {
     const toast = document.getElementById("toast");
 
     if (toast) {
-      toast.textContent = text;
+      toast.textContent = message;
       toast.classList.add("show");
-      setTimeout(() => toast.classList.remove("show"), 3000);
+      setTimeout(() => toast.classList.remove("show"), 3200);
     } else {
-      alert(text);
+      console.info("MORNI:", message);
     }
   }
 
   function formatDate(value) {
     return new Date(value).toLocaleDateString([], {
-      weekday: "short",
+      weekday: "long",
       day: "numeric",
-      month: "short",
+      month: "long",
       year: "numeric"
     });
   }
@@ -5741,111 +5743,150 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
   }
 
   function getNextMeeting() {
-    const now = Date.now();
-
-    return meetings
-      .filter(item => new Date(item.startAt).getTime() >= now)
+    return readEvents()
+      .filter(m => new Date(m.startAt).getTime() >= Date.now())
       .sort((a, b) =>
         new Date(a.startAt) - new Date(b.startAt)
       )[0] || null;
   }
 
-  /* ------------------------------------------------------------
-     NAVIGATION — native sidebar and mobile navigation
-     ------------------------------------------------------------ */
+  function addMeeting(item) {
+    const list = readEvents();
+    const index = list.findIndex(m => m.id === item.id);
+
+    if (index >= 0) {
+      list[index] = { ...list[index], ...item };
+    } else {
+      list.push(item);
+    }
+
+    saveEvents(list);
+
+    if (servicesOpen) renderPage();
+    updateOverviewCard();
+  }
+
+  /* ---------------- NAVIGATION ---------------- */
 
   const navButton = document.createElement("button");
+  navButton.type = "button";
   navButton.className = "nav-btn";
   navButton.dataset.page = "services";
-  navButton.innerHTML = "<span>✦</span> Connected Services";
-  navButton.type = "button";
+  navButton.innerHTML =
+    '<span class="ms-nav-icon">✦</span><span>Connected Services</span>';
 
-  const insightsButton =
-    sidebar.querySelector('[data-page="insights"]');
+  const insights = sidebar.querySelector('[data-page="insights"]');
 
-  if (insightsButton) {
-    insightsButton.insertAdjacentElement("afterend", navButton);
+  if (insights) {
+    insights.insertAdjacentElement("afterend", navButton);
   } else {
     sidebar.appendChild(navButton);
   }
 
-  if (mobileNav && !mobileNav.querySelector('[data-page="services"]')) {
-    const mobileButton = document.createElement("button");
-    mobileButton.dataset.page = "services";
-    mobileButton.type = "button";
-    mobileButton.innerHTML = "<span>✦</span>Services";
-    mobileNav.appendChild(mobileButton);
+  function showPage() {
+    servicesOpen = true;
+
+    document.querySelectorAll("[data-page]").forEach(el => {
+      el.classList.toggle("active", el.dataset.page === "services");
+    });
+
+    const breadcrumb = document.getElementById("breadcrumb");
+    if (breadcrumb) {
+      breadcrumb.textContent = "Workspace / Connected Services";
+    }
+
+    renderPage();
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  const serviceCSS = `
+  document.addEventListener("click", event => {
+    const button = event.target.closest('[data-page="services"]');
+    if (!button) return;
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    showPage();
+  }, true);
+
+  document.addEventListener("click", event => {
+    if (event.target.closest('[data-page]:not([data-page="services"])')) {
+      servicesOpen = false;
+    }
+  });
+
+  /* ---------------- PREMIUM DESIGN ---------------- */
+
+  const css = `
     #pageContent .ms-page {
-      animation: msEnter .35s ease both;
-      color: var(--text, #193b2a);
+      color:var(--text,#193b2a);
+      animation:msEnter .35s ease both;
     }
 
     @keyframes msEnter {
-      from { opacity: 0; transform: translateY(9px); }
-      to { opacity: 1; transform: translateY(0); }
+      from {opacity:0;transform:translateY(12px)}
+      to {opacity:1;transform:translateY(0)}
     }
 
     #pageContent .ms-heading {
       display:flex;
-      align-items:flex-start;
       justify-content:space-between;
-      gap:16px;
-      margin:8px 0 24px;
+      align-items:center;
       flex-wrap:wrap;
-    }
-
-    #pageContent .ms-heading h1 {
-      margin:5px 0;
-      font-size:clamp(30px,4vw,43px);
-      letter-spacing:-1.5px;
-      color:var(--text,#193b2a);
+      gap:12px;
+      margin:8px 0 22px;
     }
 
     #pageContent .ms-kicker {
-      color:#368653;
+      color:#bd8539;
       font-size:10px;
       font-weight:900;
-      letter-spacing:1.8px;
+      letter-spacing:2px;
+    }
+
+    #pageContent .ms-heading h1 {
+      font-size:clamp(30px,4vw,43px);
+      letter-spacing:-1.7px;
+      margin:5px 0;
+      color:var(--text,#193b2a);
     }
 
     #pageContent .ms-heading p {
       color:var(--muted,#718174);
-      margin:5px 0;
       line-height:1.6;
+      margin:5px 0;
     }
 
     #pageContent .ms-hero {
-      padding:25px;
-      border-radius:23px;
-      background:linear-gradient(115deg,#173e2b,#28764a 68%,#e69b43);
-      color:white;
-      margin-bottom:18px;
       position:relative;
       overflow:hidden;
-      box-shadow:0 12px 30px #173e2b20;
+      padding:clamp(22px,4vw,34px);
+      border-radius:25px;
+      margin-bottom:18px;
+      color:white;
+      background:
+        radial-gradient(circle at 90% 15%,#e9b45a66,transparent 32%),
+        linear-gradient(115deg,#153b29,#28734a 70%,#a66b32);
+      box-shadow:0 15px 35px #183d2925;
     }
 
     #pageContent .ms-hero h2 {
       color:white;
-      font-size:25px;
-      margin:0 0 8px;
+      font-size:clamp(23px,3vw,30px);
+      margin:0 0 9px;
     }
 
     #pageContent .ms-hero p {
-      color:#eff8ed;
+      color:#edf5e9;
+      max-width:620px;
+      line-height:1.7;
       margin:0;
-      max-width:650px;
-      line-height:1.65;
     }
 
     #pageContent .ms-hero-mark {
       position:absolute;
       right:25px;
-      top:5px;
-      font-size:95px;
+      top:0;
+      font-size:100px;
       opacity:.15;
       pointer-events:none;
     }
@@ -5853,17 +5894,23 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     #pageContent .ms-grid {
       display:grid;
       grid-template-columns:repeat(2,minmax(0,1fr));
-      gap:15px;
-      margin-bottom:17px;
+      gap:16px;
     }
 
     #pageContent .ms-card {
-      background:var(--surface,#fffdf7);
-      border:1px solid var(--line,#e4e9df);
-      border-radius:19px;
-      padding:19px;
       min-width:0;
-      box-shadow:0 5px 18px #173e2b08;
+      padding:21px;
+      border:1px solid var(--line,#e2e9de);
+      border-radius:21px;
+      background:var(--surface,#fffdf7);
+      box-shadow:0 7px 24px #183d2909;
+      transition:transform .2s,border-color .2s,box-shadow .2s;
+    }
+
+    #pageContent .ms-card:hover {
+      transform:translateY(-2px);
+      border-color:#a8c5a5;
+      box-shadow:0 12px 28px #183d2912;
     }
 
     #pageContent .ms-card h2 {
@@ -5874,76 +5921,77 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
     #pageContent .ms-card h3 {
       font-size:15px;
-      margin:0 0 8px;
+      margin:0 0 9px;
       color:var(--text,#193b2a);
+    }
+
+    #pageContent .ms-icon {
+      width:45px;
+      height:45px;
+      display:grid;
+      place-items:center;
+      border-radius:14px;
+      background:linear-gradient(145deg,#eaf3e5,#f6ead7);
+      color:#286b42;
+      font-size:21px;
+      margin-bottom:14px;
     }
 
     #pageContent .ms-muted {
       color:var(--muted,#718174);
       font-size:12px;
-      line-height:1.6;
+      line-height:1.7;
     }
 
-    #pageContent .ms-icon {
-      width:43px;
-      height:43px;
-      display:grid;
-      place-items:center;
-      border-radius:13px;
-      background:#e9f2df;
-      color:#286b42;
-      font-size:21px;
-      margin-bottom:13px;
+    #pageContent .ms-status {
+      color:var(--muted,#718174);
+      font-size:12px;
+      line-height:1.6;
+      margin:11px 0;
+      overflow-wrap:anywhere;
     }
 
     #pageContent .ms-button {
       border:0;
-      border-radius:10px;
+      border-radius:11px;
       padding:11px 15px;
-      background:#247747;
+      background:#286b43;
       color:white;
       font-weight:800;
       cursor:pointer;
-      margin:5px 4px 3px 0;
-      transition:transform .15s,filter .15s;
+      margin:5px 5px 4px 0;
+      transition:transform .18s,filter .18s;
     }
 
     #pageContent .ms-button:hover {
-      filter:brightness(1.08);
-      transform:translateY(-1px);
+      transform:translateY(-2px);
+      filter:brightness(1.09);
     }
 
     #pageContent .ms-button.orange {
-      background:#d98232;
+      background:#c98236;
     }
 
     #pageContent .ms-button.soft {
-      background:#e8f0e2;
-      color:#245b39;
+      background:#e9f1e5;
+      color:#285b3b;
     }
 
     #pageContent .ms-input {
       width:100%;
+      box-sizing:border-box;
+      padding:12px;
       min-height:43px;
-      padding:10px 12px;
       border:1px solid var(--line,#dce5d9);
-      border-radius:10px;
+      border-radius:11px;
       background:var(--input-bg,#fff);
       color:var(--text,#193b2a);
-      margin:6px 0 10px;
       font:inherit;
-      box-sizing:border-box;
-    }
-
-    #pageContent .ms-status {
-      font-size:12px;
-      color:var(--muted,#718174);
-      margin:9px 0;
-      line-height:1.5;
+      margin:6px 0 10px;
     }
 
     #pageContent .ms-list-item {
-      padding:12px 0;
+      padding:13px 0;
       border-bottom:1px solid var(--line,#e4e9df);
       overflow-wrap:anywhere;
     }
@@ -5954,58 +6002,79 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
     #pageContent .ms-list-item strong {
       display:block;
-      margin-bottom:5px;
+      margin-bottom:6px;
       color:var(--text,#193b2a);
+      line-height:1.5;
     }
 
     #pageContent .ms-list-item small {
       display:block;
       color:var(--muted,#718174);
-      line-height:1.5;
+      line-height:1.6;
+      margin:3px 0;
+    }
+
+    #pageContent .ms-list-item a {
+      display:inline-block;
+      margin-top:7px;
+      color:#32764a;
+      font-size:12px;
+      font-weight:800;
     }
 
     #pageContent .ms-meeting {
-      border:1px solid #d8e7d4;
-      background:linear-gradient(140deg,#f4f8ed,#fffaf0);
-      border-radius:15px;
-      padding:15px;
-      margin:11px 0;
+      padding:16px;
+      margin:12px 0;
+      border-radius:16px;
+      border:1px solid #d5e5d0;
+      background:linear-gradient(140deg,#f0f7eb,#fff9ef);
       color:#24452e;
     }
 
     #pageContent .ms-meeting strong {
-      display:block;
       font-size:16px;
-      margin-bottom:6px;
+      display:block;
+      margin-bottom:7px;
     }
 
     #pageContent .ms-meeting p {
       font-size:12px;
-      margin:5px 0;
-      line-height:1.5;
+      line-height:1.6;
+      margin:6px 0;
       color:#536b56;
+      overflow-wrap:anywhere;
     }
 
     #pageContent .ms-meeting input {
-      width:90px;
-      min-height:35px;
-      padding:6px;
+      width:85px;
+      padding:8px;
       border:1px solid #cbdac8;
       border-radius:8px;
-      margin:5px 5px 5px 0;
+      margin:4px;
     }
 
-    #pageContent .ms-meeting-result {
+    #pageContent .ms-result {
+      color:#286b43;
+      font-size:12px;
       font-weight:800;
-      color:#236b40;
-      font-size:13px;
-      margin-top:8px;
+      line-height:1.6;
+      margin:9px 0;
+    }
+
+    .ms-nav-icon {
+      display:inline-grid;
+      place-items:center;
+      width:23px;
+      height:23px;
+      margin-right:9px;
+      border-radius:8px;
+      background:#e9f0df;
+      color:#b77c35;
     }
 
     body[data-theme="dark"] #pageContent .ms-card {
       background:#1c2b21;
       border-color:#3b5140;
-      color:#eef4e9;
     }
 
     body[data-theme="dark"] #pageContent .ms-card h2,
@@ -6020,8 +6089,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       color:#eef4e9;
     }
 
-    body[data-theme="dark"] #pageContent .ms-meeting p,
-    body[data-theme="dark"] #pageContent .ms-meeting-result {
+    body[data-theme="dark"] #pageContent .ms-meeting p {
       color:#d3e5cf;
     }
 
@@ -6033,73 +6101,43 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     }
 
     @media(max-width:700px) {
-      #pageContent .ms-grid {
-        grid-template-columns:1fr;
-      }
-      #pageContent .ms-hero {
-        padding:20px;
-      }
-      #pageContent .ms-hero-mark {
-        font-size:65px;
-      }
+      #pageContent .ms-grid {grid-template-columns:1fr}
+      #pageContent .ms-hero-mark {font-size:65px}
+    }
+
+    @media(prefers-reduced-motion:reduce) {
+      #pageContent .ms-page,
+      #pageContent .ms-card,
+      #pageContent .ms-button {animation:none;transition:none}
     }
   `;
 
   const style = document.createElement("style");
   style.id = "morni-connected-services-styles";
-  style.textContent = serviceCSS;
+  style.textContent = css;
   document.head.appendChild(style);
 
-  function showServicesPage() {
-    currentPage = true;
+  /* ---------------- PAGE RENDERING ---------------- */
 
-    document.querySelectorAll("[data-page]").forEach(button => {
-      button.classList.toggle(
-        "active",
-        button.dataset.page === "services"
-      );
-    });
-
-    const breadcrumb = document.getElementById("breadcrumb");
-    if (breadcrumb) {
-      breadcrumb.textContent = "Workspace / Connected Services";
-    }
-
-    renderServicesPage();
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }
-
-  // Capture only the Connected Services click.
-  // All other original navigation clicks continue normally.
-  document.addEventListener("click", event => {
-    const target = event.target.closest('[data-page="services"]');
-    if (!target) return;
-
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    showServicesPage();
-  }, true);
-
-  function renderServicesPage() {
+  function renderPage() {
     const next = getNextMeeting();
 
     root.innerHTML = `
       <div class="ms-page">
-
-        <div class="ms-heading">
+        <header class="ms-heading">
           <div>
-            <span class="ms-kicker">MORNI CONNECTED ECOSYSTEM</span>
-            <h1>Connected Services<span style="color:#d98232">.</span></h1>
-            <p>Your inbox, meetings, location and daily information in one place.</p>
+            <span class="ms-kicker">MORNI · CONNECTED ECOSYSTEM</span>
+            <h1>Connected Services<span style="color:#c98236">.</span></h1>
+            <p>Your information, meetings and everyday tools — together.</p>
           </div>
-        </div>
+        </header>
 
         <section class="ms-hero">
           <div class="ms-hero-mark">✦</div>
-          <h2>Your day, connected.</h2>
+          <h2>Your world, in sync.</h2>
           <p>
-            MORNI brings your important information together,
-            helping you stay aware, organised and ready for what's next.
+            Stay on top of your inbox, discover your next destination,
+            understand the news and plan your day with MORNI.
           </p>
         </section>
 
@@ -6108,159 +6146,118 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
           <section class="ms-card">
             <div class="ms-icon">✉</div>
             <h2>Gmail Inbox</h2>
-            <p class="ms-muted">
-              Connect your Google account to view recent inbox messages.
-              MORNI uses read-only access.
-            </p>
+            <p class="ms-muted">Read recent inbox messages using secure, read-only Google access.</p>
             <div id="ms-gmail-status" class="ms-status">
-              Gmail is not connected.
+              Gmail is not connected in this session.
             </div>
-            <button class="ms-button" data-ms-action="connect-gmail">
-              Connect Gmail
-            </button>
-            <button class="ms-button soft" data-ms-action="refresh-gmail">
-              Refresh Inbox
-            </button>
+            <button class="ms-button" data-action="connect">Connect Gmail</button>
+            <button class="ms-button soft" data-action="refresh">Refresh</button>
             <div id="ms-gmail-list"></div>
           </section>
 
           <section class="ms-card">
             <div class="ms-icon">◷</div>
             <h2>Meeting Assistant</h2>
-            <p class="ms-muted">
-              MORNI checks connected email messages for meeting details
-              and helps plan when to leave.
-            </p>
-            <div id="ms-meetings">
-              ${renderMeetings()}
-            </div>
+            <p class="ms-muted">Find meeting details in your emails and plan your journey.</p>
+            <div id="ms-meetings">${renderMeetings()}</div>
           </section>
 
           <section class="ms-card">
             <div class="ms-icon">⌖</div>
             <h2>Live Location & Maps</h2>
-            <p class="ms-muted">
-              Use your browser's location permission to find your
-              current position and open Google Maps.
-            </p>
+            <p class="ms-muted">Find your current position and open Google Maps.</p>
             <div id="ms-location-status" class="ms-status">
               Location has not been requested.
             </div>
-            <button class="ms-button" data-ms-action="locate">
-              Find My Location
-            </button>
-            <button class="ms-button soft" data-ms-action="open-map">
-              Open Google Maps
-            </button>
+            <button class="ms-button" data-action="locate">Find My Location</button>
+            <button class="ms-button soft" data-action="map">Open Google Maps</button>
           </section>
 
           <section class="ms-card">
             <div class="ms-icon">☀</div>
             <h2>Local Weather</h2>
-            <p class="ms-muted">
-              Current weather based on your location.
-              Powered by Open-Meteo.
-            </p>
-            <div id="ms-weather-result" class="ms-status">
+            <p class="ms-muted">Live weather conditions for your current location.</p>
+            <div id="ms-weather" class="ms-status">
               Find your location to load weather.
             </div>
-            <button class="ms-button" data-ms-action="weather">
-              Refresh Weather
-            </button>
+            <button class="ms-button" data-action="weather">Refresh Weather</button>
           </section>
 
           <section class="ms-card">
             <div class="ms-icon">▤</div>
-            <h2>Local Daily News</h2>
-            <p class="ms-muted">
-              Headlines for a city or region you choose.
-            </p>
-            <input id="ms-news-city" class="ms-input"
-              placeholder="Enter city or region" value="Kerala">
-            <button class="ms-button" data-ms-action="news">
-              Load Headlines
-            </button>
-            <div id="ms-news-result" class="ms-status">
-              Enter a region to load headlines.
+            <h2>Daily News</h2>
+            <p class="ms-muted">Headlines with simpler descriptions and useful context.</p>
+            <input id="ms-news-city" class="ms-input" value="Kerala"
+              placeholder="Enter city or region">
+            <button class="ms-button" data-action="news">Discover News</button>
+            <div id="ms-news" class="ms-status">
+              Choose a region to load headlines.
             </div>
           </section>
 
           <section class="ms-card">
             <div class="ms-icon">✧</div>
-            <h2>Privacy & Connection</h2>
+            <h2>Privacy & Connections</h2>
             <p class="ms-muted">
-              Gmail access is read-only. Location is requested only
-              after you press the location button.
+              Gmail uses read-only access. Your access token stays in memory.
+              Location is requested only when you choose to share it.
             </p>
             <div class="ms-status">
-              Your Gmail access token stays in memory and is not
-              saved in local storage.
+              Meeting details are stored locally in this browser.
             </div>
             <div class="ms-status">
-              Meeting information is stored locally in this browser.
+              Disconnecting or refreshing the page may require reconnecting Gmail.
             </div>
           </section>
 
         </div>
       </div>
     `;
+
+    updateLocationStatus();
   }
 
-  /* ------------------------------------------------------------
-     MEETING ASSISTANT
-     ------------------------------------------------------------ */
-
   function renderMeetings() {
-    meetings = readEvents();
-
-    const upcoming = meetings
-      .filter(item => new Date(item.startAt).getTime() > Date.now())
+    const list = readEvents()
+      .filter(m => new Date(m.startAt).getTime() > Date.now())
       .sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
 
     let html = `
       <form id="ms-meeting-form" style="margin-top:15px">
-        <h3>Add a meeting manually</h3>
-        <input class="ms-input" name="title" required
-          placeholder="Meeting topic">
-        <input class="ms-input" name="venue"
-          placeholder="Venue or destination">
-        <input class="ms-input" name="startAt"
-          type="datetime-local" required>
-        <button class="ms-button orange" type="submit">
-          Add Meeting
-        </button>
+        <h3>Add a meeting</h3>
+        <input class="ms-input" name="title" required placeholder="Meeting title">
+        <input class="ms-input" name="venue" placeholder="Venue or destination">
+        <input class="ms-input" name="startAt" type="datetime-local" required>
+        <button class="ms-button orange" type="submit">Add Meeting</button>
       </form>
     `;
 
-    if (!upcoming.length) {
-      return html + `
-        <p class="ms-status">
-          No upcoming meetings found yet. Connect Gmail or add one above.
-        </p>
-      `;
+    if (!list.length) {
+      return html + '<p class="ms-status">No upcoming meetings found yet.</p>';
     }
 
-    html += `<h3 style="margin-top:20px">Upcoming meetings</h3>`;
+    html += '<h3 style="margin-top:20px">Upcoming meetings</h3>';
 
-    upcoming.slice(0, 6).forEach(item => {
+    list.slice(0, 8).forEach(item => {
       html += `
-        <article class="ms-meeting" data-meeting-id="${escapeHTML(item.id)}">
+        <article class="ms-meeting" data-meeting="${escapeHTML(item.id)}">
           <strong>${escapeHTML(item.title)}</strong>
           <p>◷ ${formatDate(item.startAt)} · ${formatTime(item.startAt)}</p>
-          <p>⌖ ${escapeHTML(item.venue || "Venue not specified")}</p>
-          <p>Travel estimate (minutes)</p>
-          <input type="number" min="0" max="600"
-            data-travel value="${Number(item.travelMinutes ?? 30)}">
-          <p>Extra buffer (minutes)</p>
-          <input type="number" min="0" max="180"
-            data-buffer value="${Number(item.bufferMinutes ?? 15)}">
-          <button class="ms-button" data-ms-action="plan-meeting">
-            Plan Route & Departure
-          </button>
-          <div class="ms-meeting-result" data-departure-result></div>
-          <button class="ms-button soft" data-ms-action="delete-meeting">
-            Remove
-          </button>
+          <p>⌖ Destination: ${escapeHTML(item.venue || "Not detected — please add it")}</p>
+          ${item.venueConfirmed
+            ? '<p>Destination extracted from email. Verify the exact place in Maps.</p>'
+            : '<p>Check the venue before travelling.</p>'}
+          <p>Travel estimate in minutes</p>
+          <input type="number" min="0" max="600" data-travel
+            value="${Number(item.travelMinutes ?? 30)}">
+          <p>Extra buffer in minutes</p>
+          <input type="number" min="0" max="180" data-buffer
+            value="${Number(item.bufferMinutes ?? 15)}">
+          <br>
+          <button class="ms-button" data-action="route">Get Directions</button>
+          <button class="ms-button soft" data-action="departure">Plan Departure</button>
+          <button class="ms-button soft" data-action="remove">Remove</button>
+          <div class="ms-result" data-result></div>
         </article>
       `;
     });
@@ -6268,76 +6265,10 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     return html;
   }
 
-  function addMeeting(item) {
-    meetings = readEvents();
+  /* ---------------- DATE AND TIME EXTRACTION ---------------- */
 
-    const existing = meetings.findIndex(
-      meeting => meeting.id === item.id
-    );
-
-    if (existing >= 0) {
-      meetings[existing] = {
-        ...meetings[existing],
-        ...item
-      };
-    } else {
-      meetings.push(item);
-    }
-
-    saveEvents(meetings);
-
-    if (currentPage) renderServicesPage();
-    updateOverviewMeeting();
-  }
-
-  function updateOverviewMeeting() {
-    const homeActive =
-      document.querySelector('.side-nav [data-page="home"]')?.classList.contains("active");
-
-    if (!homeActive || currentPage) return;
-
-    const pageRoot = document.getElementById("pageContent");
-    if (!pageRoot) return;
-
-    pageRoot.querySelector("#ms-overview-meeting")?.remove();
-
-    const next = getNextMeeting();
-    if (!next) return;
-
-    const card = document.createElement("section");
-    card.id = "ms-overview-meeting";
-    card.className = "morni-glass-panel";
-    card.style.cssText =
-      "padding:18px;margin:14px 0;border:1px solid #d5e5ce;border-radius:17px";
-
-    card.innerHTML = `
-      <span style="font-size:10px;font-weight:900;letter-spacing:1.5px;color:#368653">
-        UPCOMING MEETING
-      </span>
-      <h3 style="margin:8px 0">${escapeHTML(next.title)}</h3>
-      <p style="font-size:13px">
-        ${formatDate(next.startAt)} · ${formatTime(next.startAt)}
-      </p>
-      <p style="font-size:12px">
-        ${escapeHTML(next.venue || "Venue not specified")}
-      </p>
-      <button class="btn btn-primary" data-page="services">
-        Open Meeting Assistant
-      </button>
-    `;
-
-    const hero = pageRoot.querySelector(".welcome-hero");
-
-    if (hero) {
-      hero.insertAdjacentElement("afterend", card);
-    } else {
-      pageRoot.prepend(card);
-    }
-  }
-
-  // Detect date and time in common written email formats.
   function extractDateTime(text) {
-    let day, month, year;
+    let year, month, day;
     let match;
 
     match = text.match(/\b(20\d{2})-(\d{1,2})-(\d{1,2})\b/);
@@ -6349,7 +6280,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     }
 
     if (!match) {
-      match = text.match(/\b(\d{1,2})[\/-](\d{1,2})[\/-](20\d{2})\b/);
+      match = text.match(/\b(\d{1,2})[/-](\d{1,2})[/-](20\d{2})\b/);
 
       if (match) {
         day = Number(match[1]);
@@ -6360,52 +6291,50 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
     if (!match) {
       match = text.match(
-        /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{1,2})(?:,?\s+(20\d{2}))?/i
+        /\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})(?:,?\s+(20\d{2}))?/i
       );
 
       if (match) {
-        const months = [
+        const names = [
           "jan","feb","mar","apr","may","jun",
           "jul","aug","sep","oct","nov","dec"
         ];
-
-        month = months.indexOf(match[1].slice(0,3).toLowerCase());
+        month = names.indexOf(match[1].slice(0,3).toLowerCase());
         day = Number(match[2]);
         year = Number(match[3] || new Date().getFullYear());
       }
     }
 
     if (!match && /\btomorrow\b/i.test(text)) {
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      year = tomorrow.getFullYear();
-      month = tomorrow.getMonth();
-      day = tomorrow.getDate();
+      const d = new Date();
+      d.setDate(d.getDate() + 1);
+      year = d.getFullYear();
+      month = d.getMonth();
+      day = d.getDate();
     }
 
     if (!match && /\btoday\b/i.test(text)) {
-      const today = new Date();
-      year = today.getFullYear();
-      month = today.getMonth();
-      day = today.getDate();
+      const d = new Date();
+      year = d.getFullYear();
+      month = d.getMonth();
+      day = d.getDate();
     }
 
     if (year == null) return null;
-
-    let hour = 9;
-    let minute = 0;
 
     const timeMatch = text.match(
       /\b(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/i
     );
 
+    let hour = 9;
+    let minute = 0;
+
     if (timeMatch) {
       hour = Number(timeMatch[1]);
       minute = Number(timeMatch[2] || 0);
-      const meridiem = timeMatch[3].toLowerCase();
 
-      if (meridiem.startsWith("p") && hour < 12) hour += 12;
-      if (meridiem.startsWith("a") && hour === 12) hour = 0;
+      if (/^p/i.test(timeMatch[3]) && hour < 12) hour += 12;
+      if (/^a/i.test(timeMatch[3]) && hour === 12) hour = 0;
     } else {
       const time24 = text.match(/\b(?:at\s*)?([01]?\d|2[0-3]):([0-5]\d)\b/);
       if (!time24) return null;
@@ -6415,40 +6344,73 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
     const result = new Date(year, month, day, hour, minute);
 
-    if (Number.isNaN(result.getTime())) return null;
+    // Reject invalid calendar dates rather than silently changing them.
+    if (
+      result.getFullYear() !== year ||
+      result.getMonth() !== month ||
+      result.getDate() !== day
+    ) return null;
 
     return result;
   }
 
-  function extractMeetingFromEmail(mail) {
-    const headers = mail.payload?.headers || [];
+  /* ---------------- GENERAL VENUE EXTRACTION ---------------- */
 
-    const header = name =>
+  function extractVenue(text) {
+    const clean = String(text || "")
+      .replace(/\r/g, "\n")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const patterns = [
+      /\b(?:the meeting|our meeting|meeting|appointment|event|interview|conference)\s+(?:will\s+be\s+)?(?:is\s+)?(?:going\s+to\s+be\s+)?(?:held\s+)?(?:at|in|near)\s+(.+?)(?=\.|,?\s+(?:the date|date|on \d|tomorrow|today|at \d|time will|time is|and the time|please come|so please)\b|$)/i,
+      /\b(?:venue|location|address|destination)\s*[:\-]\s*(.+?)(?=\.|,?\s+(?:date|time|tomorrow|today)\b|$)/i,
+      /\bwe\s+(?:will\s+)?meet\s+(?:you\s+)?(?:at|in|near)\s+(.+?)(?=\.|,?\s+(?:on \d|tomorrow|today|at \d|the date|the time)\b|$)/i,
+      /\b(?:come|go|reach|arrive)\s+(?:to|at)\s+(.+?)(?=\.|,?\s+(?:on \d|tomorrow|today|at \d|the date|the time)\b|$)/i
+    ];
+
+    for (const pattern of patterns) {
+      const match = clean.match(pattern);
+      if (match && match[1]) {
+        let venue = match[1]
+          .replace(/\b(?:and the date|and the time|the date will be|the time will be).*$/i, "")
+          .replace(/[.!?]+$/, "")
+          .trim();
+
+        venue = venue.replace(/^(?:the|a|an)\s+/i, "");
+
+        if (venue.length >= 3 && venue.length <= 180) {
+          return venue;
+        }
+      }
+    }
+
+    return "";
+  }
+
+  function extractMeeting(mail) {
+    const headers = mail.payload?.headers || [];
+    const getHeader = name =>
       headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || "";
 
-    const subject = header("Subject");
-    const text = mail._morniText || "";
-    const combined = subject + "\n" + text;
+    const subject = getHeader("Subject");
+    const body = mail._morniText || "";
+    const combined = subject + "\n" + body;
 
-    if (!/\b(meeting|appointment|interview|conference|webinar|event|google meet|zoom call|schedule|invitation|invite|session)\b/i.test(combined)) {
+    if (!/\b(meeting|appointment|interview|conference|webinar|event|google meet|zoom call|invitation|invite|session)\b/i.test(combined)) {
       return null;
     }
 
     const start = extractDateTime(combined);
-    if (!start || start.getTime() < Date.now() - 86400000) {
-      return null;
-    }
+    if (!start || start.getTime() < Date.now() - 86400000) return null;
 
-    const venueMatch = text.match(
-      /(?:venue|location|address|meeting link|where)\s*[:\-]\s*([^\n\r]+)/i
-    );
-
-    const title = subject || "Scheduled meeting";
+    const venue = extractVenue(body);
 
     return {
       id: "gmail-" + mail.id,
-      title,
-      venue: venueMatch ? venueMatch[1].trim().slice(0, 180) : "",
+      title: subject || "Scheduled meeting",
+      venue,
+      venueConfirmed: Boolean(venue),
       startAt: start.toISOString(),
       source: "Gmail",
       travelMinutes: 30,
@@ -6456,16 +6418,14 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     };
   }
 
+  /* ---------------- EMAIL BODY DECODING ---------------- */
+
   function decodeBase64URL(value) {
     try {
-      const base64 = value
-        .replace(/-/g, "+")
-        .replace(/_/g, "/");
-
+      const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
       const padded = base64 + "=".repeat((4 - base64.length % 4) % 4);
       const binary = atob(padded);
-      const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
-
+      const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
       return new TextDecoder().decode(bytes);
     } catch {
       return "";
@@ -6473,15 +6433,18 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
   }
 
   function getEmailBody(payload) {
-    const parts = [];
+    const plain = [];
+    const html = [];
 
     function walk(part) {
       if (!part) return;
 
       if (part.mimeType === "text/plain" && part.body?.data) {
-        parts.unshift(decodeBase64URL(part.body.data));
-      } else if (part.mimeType === "text/html" && part.body?.data) {
-        parts.push(
+        plain.push(decodeBase64URL(part.body.data));
+      }
+
+      if (part.mimeType === "text/html" && part.body?.data) {
+        html.push(
           decodeBase64URL(part.body.data)
             .replace(/<style[\s\S]*?<\/style>/gi, " ")
             .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -6493,12 +6456,18 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     }
 
     walk(payload);
-    return parts.join("\n").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&");
+
+    return (plain.length ? plain : html)
+      .join("\n")
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, " ")
+      .trim();
   }
 
-  /* ------------------------------------------------------------
-     GMAIL CONNECTION
-     ------------------------------------------------------------ */
+  /* ---------------- GMAIL ---------------- */
 
   function loadGoogleIdentity() {
     return new Promise((resolve, reject) => {
@@ -6533,7 +6502,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       await loadGoogleIdentity();
 
       tokenClient = google.accounts.oauth2.initTokenClient({
-        client_id: GOOGLE_CLIENT_ID,
+        client_id: CLIENT_ID,
         scope: GMAIL_SCOPE,
         callback: async response => {
           if (response.error) {
@@ -6552,9 +6521,8 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       });
 
       tokenClient.requestAccessToken();
-    } catch (error) {
-      if (status) status.textContent =
-        "Could not load Google sign-in. Check your connection.";
+    } catch {
+      if (status) status.textContent = "Google sign-in could not load. Check your connection.";
     }
   }
 
@@ -6568,7 +6536,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     const status = document.getElementById("ms-gmail-status");
     const list = document.getElementById("ms-gmail-list");
 
-    if (status) status.textContent = "Checking inbox...";
+    if (status) status.textContent = "Checking your inbox...";
 
     try {
       const response = await fetch(
@@ -6578,9 +6546,8 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
       if (response.status === 401) {
         gmailToken = null;
-        clearInterval(gmailPolling);
-        if (status) status.textContent =
-          "Gmail session expired. Please reconnect.";
+        if (gmailPolling) clearInterval(gmailPolling);
+        if (status) status.textContent = "Gmail session expired. Please reconnect.";
         return;
       }
 
@@ -6588,11 +6555,12 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
       const data = await response.json();
       const messages = data.messages || [];
-      const ids = new Set(messages.map(item => item.id));
+      const ids = new Set(messages.map(m => m.id));
 
-      if (!initial && previousMailIds.size > 0) {
-        const newMail = messages.some(item => !previousMailIds.has(item.id));
-        if (newMail) notify("📧 MORNI: You received a new email.");
+      if (!initial && previousMailIds.size) {
+        if (messages.some(m => !previousMailIds.has(m.id))) {
+          notify("📧 MORNI: You received a new email.");
+        }
       }
 
       previousMailIds = ids;
@@ -6609,17 +6577,29 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
           const mail = await result.json();
           mail._morniText = getEmailBody(mail.payload);
-
           return mail;
         })
       );
 
       const valid = details.filter(Boolean);
 
-      valid.forEach(mail => {
-        const meeting = extractMeetingFromEmail(mail);
-        if (meeting) addMeeting(meeting);
-      });
+      // Batch changes, then render only once.
+      const existing = readEvents();
+
+      for (const mail of valid) {
+        const meeting = extractMeeting(mail);
+        if (!meeting) continue;
+
+        const index = existing.findIndex(m => m.id === meeting.id);
+
+        if (index >= 0) {
+          existing[index] = { ...existing[index], ...meeting };
+        } else {
+          existing.push(meeting);
+        }
+      }
+
+      saveEvents(existing);
 
       if (list) {
         list.innerHTML = "";
@@ -6631,8 +6611,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
         valid.slice(0, 8).forEach(mail => {
           const headers = mail.payload?.headers || [];
           const getHeader = name =>
-            headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value
-            || "Not available";
+            headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || "Not available";
 
           const item = document.createElement("div");
           item.className = "ms-list-item";
@@ -6651,20 +6630,30 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
         });
       }
 
-      if (status) {
-        status.textContent = "Connected · Latest inbox messages loaded.";
+      if (status) status.textContent = "Connected · Inbox updated.";
+
+      if (servicesOpen) {
+        const meetingsContainer = document.getElementById("ms-meetings");
+        if (meetingsContainer) meetingsContainer.innerHTML = renderMeetings();
       }
-    } catch (error) {
-      if (status) {
-        status.textContent =
-          "Could not load inbox. Check your connection or reconnect Gmail.";
-      }
+
+      updateOverviewCard();
+
+    } catch {
+      if (status) status.textContent = "Inbox could not load. Check your connection or reconnect Gmail.";
     }
   }
 
-  /* ------------------------------------------------------------
-     LOCATION + WEATHER + MAPS
-     ------------------------------------------------------------ */
+  /* ---------------- LOCATION AND MAPS ---------------- */
+
+  function updateLocationStatus() {
+    const status = document.getElementById("ms-location-status");
+    if (!status) return;
+
+    status.textContent = userLocation
+      ? "Location found. Your coordinates are ready for Maps."
+      : "Location has not been requested in this session.";
+  }
 
   function locate() {
     const status = document.getElementById("ms-location-status");
@@ -6683,16 +6672,15 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
           lon: position.coords.longitude
         };
 
-        if (status) status.textContent =
-          "Location found. You can now open Maps and load weather.";
-
+        updateLocationStatus();
         loadWeather();
+        notify("Location found.");
       },
       () => {
         if (status) status.textContent =
-          "Location unavailable. Please allow location permission.";
+          "Location unavailable. Check browser permission and try again.";
       },
-      { enableHighAccuracy: true, timeout: 15000 }
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
     );
   }
 
@@ -6702,28 +6690,52 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       return;
     }
 
-    const url =
-      "https://www.google.com/maps/search/?api=1&query=" +
-      userLocation.lat + "," + userLocation.lon;
+    const url = new URL("https://www.google.com/maps/search/");
+    url.searchParams.set("api", "1");
+    url.searchParams.set("query", userLocation.lat + "," + userLocation.lon);
 
-    window.open(url, "_blank", "noopener,noreferrer");
+    window.open(url.toString(), "_blank", "noopener,noreferrer");
   }
 
+  function openMeetingRoute(meeting) {
+    if (!meeting.venue || !meeting.venue.trim()) {
+      notify("No meeting venue was detected. Add the venue first.");
+      return;
+    }
+
+    const url = new URL("https://www.google.com/maps/dir/");
+    url.searchParams.set("api", "1");
+    url.searchParams.set("destination", meeting.venue.trim());
+    url.searchParams.set("travelmode", "driving");
+
+    if (userLocation) {
+      url.searchParams.set(
+        "origin",
+        userLocation.lat + "," + userLocation.lon
+      );
+    }
+
+    window.open(url.toString(), "_blank", "noopener,noreferrer");
+  }
+
+  /* ---------------- WEATHER ---------------- */
+
   async function loadWeather() {
-    const result = document.getElementById("ms-weather-result");
+    const result = document.getElementById("ms-weather");
 
     if (!userLocation) {
       if (result) result.textContent = "Find your location first.";
       return;
     }
 
-    if (result) result.textContent = "Loading weather...";
+    if (result) result.textContent = "Loading current weather...";
 
     try {
       const url =
         "https://api.open-meteo.com/v1/forecast?latitude=" +
         userLocation.lat +
-        "&longitude=" + userLocation.lon +
+        "&longitude=" +
+        userLocation.lon +
         "&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m";
 
       const response = await fetch(url);
@@ -6734,7 +6746,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
       if (result) {
         result.innerHTML = `
-          <div style="font-size:35px;font-weight:900;color:#368653">
+          <div style="font-size:39px;font-weight:900;color:#39834e">
             ${Math.round(weather.temperature_2m)}°C
           </div>
           <p>Feels like ${Math.round(weather.apparent_temperature)}°C</p>
@@ -6743,25 +6755,38 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
         `;
       }
     } catch {
-      if (result) result.textContent =
-        "Weather could not load. Please try again.";
+      if (result) result.textContent = "Weather could not load right now.";
     }
   }
 
-  /* ------------------------------------------------------------
-     NEWS
-     ------------------------------------------------------------ */
+  /* ---------------- NEWS ---------------- */
+
+  function cleanHeadline(value) {
+    return String(value || "News update")
+      .replace(/\s+-\s+[^-]{2,80}$/, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function cleanDescription(value) {
+    const temp = document.createElement("div");
+    temp.innerHTML = String(value || "");
+    return (temp.textContent || temp.innerText || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 420);
+  }
 
   async function loadNews() {
     const city = document.getElementById("ms-news-city")?.value.trim();
-    const result = document.getElementById("ms-news-result");
+    const result = document.getElementById("ms-news");
 
     if (!city) {
       if (result) result.textContent = "Enter a city or region.";
       return;
     }
 
-    if (result) result.textContent = "Loading headlines...";
+    if (result) result.textContent = "Finding the latest headlines...";
 
     try {
       const rss =
@@ -6787,149 +6812,95 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
         item.className = "ms-list-item";
 
         const title = document.createElement("strong");
-        title.textContent = article.title || "News headline";
+        title.textContent = cleanHeadline(article.title);
+
+        const description = document.createElement("small");
+        const summary = cleanDescription(article.description);
+
+        description.textContent = summary ||
+          "Open the original report for the full story.";
 
         const date = document.createElement("small");
-        date.textContent = article.pubDate || "";
+        date.textContent = article.pubDate
+          ? "Published: " + new Date(article.pubDate).toLocaleString()
+          : "";
 
         const link = document.createElement("a");
-        link.textContent = "Read article";
+        link.textContent = "Read full report →";
         link.href = article.link;
         link.target = "_blank";
         link.rel = "noopener noreferrer";
 
-        item.append(title, date, link);
+        item.append(title, description, date, link);
         result.appendChild(item);
       });
 
       if (!data.items?.length) {
         result.textContent = "No headlines found for this region.";
       }
+
     } catch {
       if (result) result.textContent =
-        "News could not load right now. Please try again later.";
+        "News could not load. Please try again later.";
     }
   }
 
-  /* ------------------------------------------------------------
-     MEETING ROUTE + DEPARTURE PLANNER
-     ------------------------------------------------------------ */
+  /* ---------------- DEPARTURE PLANNER ---------------- */
 
-  function planMeeting(card) {
+  function planDeparture(card) {
     const meeting = readEvents().find(
-      item => item.id === card.dataset.meetingId
+      m => m.id === card.dataset.meeting
     );
 
     if (!meeting) return;
 
     const travel = Math.max(
       0,
-      Number(card.querySelector("[data-travel]")?.value || 30)
+      Math.min(600, Number(card.querySelector("[data-travel]")?.value || 30))
     );
 
     const buffer = Math.max(
       0,
-      Number(card.querySelector("[data-buffer]")?.value || 15)
+      Math.min(180, Number(card.querySelector("[data-buffer]")?.value || 15))
     );
 
-    const start = new Date(meeting.startAt);
     const departure = new Date(
-      start.getTime() - (travel + buffer) * 60000
+      new Date(meeting.startAt).getTime() - (travel + buffer) * 60000
     );
 
-    const result = card.querySelector("[data-departure-result]");
+    const result = card.querySelector("[data-result]");
 
     if (result) {
       result.textContent =
-        "Suggested departure: " +
-        formatDate(departure) + " · " + formatTime(departure) +
-        " (travel estimate + buffer)";
+        "Suggested departure: " + formatDate(departure) +
+        " · " + formatTime(departure) +
+        ". This uses your entered travel estimate, not live traffic.";
     }
 
-    meetings = readEvents();
-    const index = meetings.findIndex(item => item.id === meeting.id);
+    const list = readEvents();
+    const index = list.findIndex(m => m.id === meeting.id);
 
     if (index >= 0) {
-      meetings[index].travelMinutes = travel;
-      meetings[index].bufferMinutes = buffer;
-      saveEvents(meetings);
+      list[index].travelMinutes = travel;
+      list[index].bufferMinutes = buffer;
+      saveEvents(list);
     }
-
-    if (!meeting.venue) {
-      notify("Add a meeting venue to open its route.");
-      return;
-    }
-
-    const params = new URLSearchParams({
-      api: "1",
-      destination: meeting.venue,
-      travelmode: "driving"
-    });
-
-    if (userLocation) {
-      params.set(
-        "origin",
-        userLocation.lat + "," + userLocation.lon
-      );
-    }
-
-    window.open(
-      "https://www.google.com/maps/dir/?" + params.toString(),
-      "_blank",
-      "noopener,noreferrer"
-    );
   }
 
-  /* ------------------------------------------------------------
-     EVENT HANDLERS
-     ------------------------------------------------------------ */
-
-  root.addEventListener("click", event => {
-    const button = event.target.closest("[data-ms-action]");
-    if (!button) return;
-
-    const action = button.dataset.msAction;
-
-    if (action === "connect-gmail") connectGmail();
-    if (action === "refresh-gmail") loadInbox(false);
-    if (action === "locate") locate();
-    if (action === "open-map") openCurrentMap();
-    if (action === "weather") loadWeather();
-    if (action === "news") loadNews();
-
-    if (action === "plan-meeting") {
-      const card = button.closest("[data-meeting-id]");
-      if (card) planMeeting(card);
-    }
-
-    if (action === "delete-meeting") {
-      const card = button.closest("[data-meeting-id]");
-      if (!card) return;
-
-      meetings = readEvents().filter(
-        item => item.id !== card.dataset.meetingId
-      );
-
-      saveEvents(meetings);
-      renderServicesPage();
-      updateOverviewMeeting();
-      notify("Meeting removed.");
-    }
-  });
+  /* ---------------- MANUAL MEETINGS ---------------- */
 
   root.addEventListener("submit", event => {
     if (event.target.id !== "ms-meeting-form") return;
 
     event.preventDefault();
 
-    const form = event.target;
-    const formData = new FormData(form);
-    const title = String(formData.get("title") || "").trim();
-    const venue = String(formData.get("venue") || "").trim();
-    const startAt = new Date(String(formData.get("startAt") || ""));
+    const form = new FormData(event.target);
+    const title = String(form.get("title") || "").trim();
+    const venue = String(form.get("venue") || "").trim();
+    const startAt = new Date(String(form.get("startAt") || ""));
 
     if (!title || Number.isNaN(startAt.getTime())) {
-      notify("Please enter a valid meeting topic and date.");
+      notify("Enter a valid meeting title and date.");
       return;
     }
 
@@ -6937,45 +6908,101 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       id: "manual-" + Date.now(),
       title,
       venue,
+      venueConfirmed: Boolean(venue),
       startAt: startAt.toISOString(),
       source: "Manual",
       travelMinutes: 30,
       bufferMinutes: 15
     });
 
-    notify("Meeting added to MORNI.");
+    notify("Meeting added.");
   });
 
-  /* ------------------------------------------------------------
-     OVERVIEW CARD — refresh after normal app navigation
-     ------------------------------------------------------------ */
+  /* ---------------- BUTTON ACTIONS ---------------- */
 
-  const overviewObserver = new MutationObserver(() => {
-    if (!currentPage) {
-      updateOverviewMeeting();
+  root.addEventListener("click", event => {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+
+    const action = button.dataset.action;
+
+    if (action === "connect") connectGmail();
+    if (action === "refresh") loadInbox(false);
+    if (action === "locate") locate();
+    if (action === "map") openCurrentMap();
+    if (action === "weather") loadWeather();
+    if (action === "news") loadNews();
+
+    const card = button.closest("[data-meeting]");
+
+    if (action === "route" && card) {
+      const meeting = readEvents().find(m => m.id === card.dataset.meeting);
+      if (meeting) openMeetingRoute(meeting);
+    }
+
+    if (action === "departure" && card) {
+      planDeparture(card);
+    }
+
+    if (action === "remove" && card) {
+      saveEvents(
+        readEvents().filter(m => m.id !== card.dataset.meeting)
+      );
+      renderPage();
+      updateOverviewCard();
+      notify("Meeting removed.");
     }
   });
 
-  overviewObserver.observe(root, {
-    childList: true,
-    subtree: true
-  });
+  /* ---------------- OVERVIEW MEETING CARD ---------------- */
 
-  document.addEventListener("click", event => {
-    if (event.target.closest('[data-page]:not([data-page="services"])')) {
-      currentPage = false;
+  function updateOverviewCard() {
+    if (servicesOpen) return;
+
+    const homeButton =
+      document.querySelector('.side-nav [data-page="home"]');
+
+    if (homeButton && !homeButton.classList.contains("active")) return;
+
+    const pageRoot = document.getElementById("pageContent");
+    if (!pageRoot) return;
+
+    pageRoot.querySelector("#ms-overview-meeting")?.remove();
+
+    const next = getNextMeeting();
+    if (!next) return;
+
+    const card = document.createElement("section");
+    card.id = "ms-overview-meeting";
+    card.className = "morni-glass-panel";
+    card.style.cssText =
+      "padding:18px;margin:14px 0;border:1px solid #d5e5ce;border-radius:17px";
+
+    card.innerHTML = `
+      <span style="font-size:10px;font-weight:900;letter-spacing:1.5px;color:#368653">
+        UPCOMING MEETING
+      </span>
+      <h3 style="margin:8px 0">${escapeHTML(next.title)}</h3>
+      <p>${formatDate(next.startAt)} · ${formatTime(next.startAt)}</p>
+      <p>${escapeHTML(next.venue || "Venue not specified")}</p>
+      <button class="btn btn-primary" data-page="services">
+        Open Meeting Assistant
+      </button>
+    `;
+
+    const hero = pageRoot.querySelector(".welcome-hero");
+
+    if (hero) {
+      hero.insertAdjacentElement("afterend", card);
+    } else {
+      pageRoot.prepend(card);
     }
-  });
+  }
 
-  // Initial overview card, if the app is currently showing Overview.
-  setTimeout(updateOverviewMeeting, 800);
-
-  /* ------------------------------------------------------------
-     PUBLIC CONTROLS
-     ------------------------------------------------------------ */
+  /* ---------------- PUBLIC CONTROLS ---------------- */
 
   window.MORNI_SERVICES = {
-    open: showServicesPage,
+    open: showPage,
     locate,
     refreshWeather: loadWeather,
     refreshGmail: () => loadInbox(false),
@@ -6983,7 +7010,9 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     getMeetings: () => readEvents()
   };
 
-  console.info("MORNI Connected Services page loaded.");
+  setTimeout(updateOverviewCard, 1000);
+
+  console.info("MORNI Premium Connected Services loaded.");
 })();
 
 /* =====================================================
