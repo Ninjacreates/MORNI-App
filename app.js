@@ -10032,3 +10032,292 @@ window.MORNI_V4 = {
     initialise();
   }
 })();
+
+
+/* =========================================================
+   MORNI — V4 RECOVERY PANEL
+   Uses the verified Services bridge.
+   Safe, independent of older V3/V4 dashboard code.
+   ========================================================= */
+(() => {
+  "use strict";
+
+  if (window.__MORNI_V4_RECOVERY__) return;
+  window.__MORNI_V4_RECOVERY__ = true;
+
+  const BRIDGE = window.MORNI_V4_BRIDGE;
+  const PANEL_ID = "morni-v4-recovery";
+
+  const style = document.createElement("style");
+  style.textContent = `
+    #${PANEL_ID} {
+      margin: 22px 0;
+      padding: 22px;
+      border-radius: 22px;
+      background: linear-gradient(135deg,#102b22,#183d2e);
+      color: #f4fff7;
+      border: 1px solid rgba(160,220,170,.2);
+      box-shadow: 0 12px 35px rgba(0,0,0,.16);
+      font-family: inherit;
+    }
+    #${PANEL_ID} * { box-sizing: border-box; }
+    #${PANEL_ID} .m4-heading {
+      font-size: 21px; font-weight: 800; margin-bottom: 5px;
+    }
+    #${PANEL_ID} .m4-sub {
+      color: #b8d8c2; font-size: 13px; margin-bottom: 18px;
+    }
+    #${PANEL_ID} .m4-grid {
+      display: grid; grid-template-columns: repeat(2,minmax(0,1fr));
+      gap: 12px;
+    }
+    #${PANEL_ID} .m4-card {
+      min-width: 0; padding: 16px; border-radius: 16px;
+      background: rgba(255,255,255,.075);
+      border: 1px solid rgba(255,255,255,.09);
+    }
+    #${PANEL_ID} .m4-label {
+      color: #b9d9c2; font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .8px;
+      margin-bottom: 9px;
+    }
+    #${PANEL_ID} .m4-value {
+      font-size: 16px; font-weight: 750; line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    #${PANEL_ID} .m4-detail {
+      color: #c7ddcd; font-size: 12px; margin-top: 6px;
+      line-height: 1.5;
+    }
+    #${PANEL_ID} .m4-actions {
+      display: flex; flex-wrap: wrap; gap: 9px; margin-top: 15px;
+    }
+    #${PANEL_ID} button, #${PANEL_ID} a {
+      border: 0; border-radius: 11px; padding: 10px 14px;
+      background: #b9e76b; color: #17301f; font-weight: 750;
+      font-size: 12px; text-decoration: none; cursor: pointer;
+    }
+    #${PANEL_ID} button.secondary {
+      background: rgba(255,255,255,.12); color: white;
+      border: 1px solid rgba(255,255,255,.15);
+    }
+    @media(max-width:520px) {
+      #${PANEL_ID} { padding: 16px; }
+      #${PANEL_ID} .m4-grid { grid-template-columns: 1fr; }
+    }
+  `;
+  document.head.appendChild(style);
+
+  const getMeetings = () => {
+    try {
+      const result = BRIDGE.getMeetings();
+      return Array.isArray(result) ? result : [];
+    } catch (error) {
+      console.error("MORNI: Meeting read failed", error);
+      return [];
+    }
+  };
+
+  const getNextMeeting = () => {
+    const now = Date.now();
+    return getMeetings()
+      .map(m => ({ ...m, _date: new Date(m.startAt) }))
+      .filter(m => m.startAt && !isNaN(m._date.getTime()) && m._date.getTime() > now)
+      .sort((a, b) => a._date - b._date)[0] || null;
+  };
+
+  const formatDate = date =>
+    date.toLocaleString([], {
+      weekday: "short", month: "short", day: "numeric",
+      hour: "numeric", minute: "2-digit"
+    });
+
+  function mount() {
+    const page = document.querySelector("#pageContent .ms-page");
+    if (!page || !page.querySelector("#ms-gmail-list")) return;
+
+    if (page.querySelector("#" + PANEL_ID)) {
+      update();
+      return;
+    }
+
+    const panel = document.createElement("section");
+    panel.id = PANEL_ID;
+    panel.innerHTML = `
+      <div class="m4-heading">☀️ MORNI Morning Intelligence</div>
+      <div class="m4-sub">Your day, organised in one place.</div>
+      <div class="m4-grid">
+        <div class="m4-card">
+          <div class="m4-label">📅 Next meeting</div>
+          <div class="m4-value" id="m4-meeting">Checking your schedule...</div>
+          <div class="m4-detail" id="m4-meeting-detail"></div>
+        </div>
+        <div class="m4-card">
+          <div class="m4-label">✉️ Gmail inbox</div>
+          <div class="m4-value" id="m4-inbox">Checking inbox...</div>
+          <div class="m4-detail">Updates from your connected Gmail inbox</div>
+        </div>
+        <div class="m4-card">
+          <div class="m4-label">🌤️ Local weather</div>
+          <div class="m4-value" id="m4-weather">Location not checked</div>
+          <div class="m4-detail" id="m4-weather-detail">Use the button below to get local weather</div>
+        </div>
+        <div class="m4-card">
+          <div class="m4-label">🚗 Smart commute</div>
+          <div class="m4-value" id="m4-commute">Waiting for meeting details</div>
+          <div class="m4-detail" id="m4-commute-detail">Departure time will be calculated from your next meeting</div>
+        </div>
+      </div>
+      <div class="m4-actions">
+        <button id="m4-refresh">↻ Refresh briefing</button>
+        <button class="secondary" id="m4-weather-button">Get local weather</button>
+        <button class="secondary" id="m4-route" style="display:none">Open directions ↗</button>
+      </div>
+      <div class="m4-detail" id="m4-status" aria-live="polite"></div>
+    `;
+
+    const hero = page.querySelector(".ms-hero");
+    if (hero) hero.insertAdjacentElement("afterend", panel);
+    else page.prepend(panel);
+
+    panel.querySelector("#m4-refresh").addEventListener("click", async () => {
+      panel.querySelector("#m4-status").textContent = "Refreshing your briefing...";
+      try {
+        await BRIDGE.refreshInbox();
+      } catch (error) {
+        console.error("MORNI: Inbox refresh failed", error);
+      }
+      setTimeout(update, 900);
+    });
+
+    panel.querySelector("#m4-weather-button").addEventListener("click", loadWeather);
+    panel.querySelector("#m4-route").addEventListener("click", () => {
+      const meeting = getNextMeeting();
+      if (!meeting || !meeting.venue) return;
+      const url = "https://www.google.com/maps/dir/?api=1&destination="
+        + encodeURIComponent(meeting.venue);
+      window.open(url, "_blank", "noopener");
+    });
+
+    update();
+  }
+
+  function update() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+
+    const meeting = getNextMeeting();
+    const meetingEl = panel.querySelector("#m4-meeting");
+    const meetingDetail = panel.querySelector("#m4-meeting-detail");
+    const commute = panel.querySelector("#m4-commute");
+    const commuteDetail = panel.querySelector("#m4-commute-detail");
+    const routeButton = panel.querySelector("#m4-route");
+
+    if (meeting) {
+      meetingEl.textContent = meeting.title || "Upcoming meeting";
+      meetingDetail.textContent =
+        formatDate(meeting._date) +
+        (meeting.venue ? " · " + meeting.venue : "");
+
+      const travel = Math.max(0, Number(meeting.travelMinutes) || 30);
+      const buffer = Math.max(0, Number(meeting.bufferMinutes) || 15);
+      const departure = new Date(meeting._date.getTime() - (travel + buffer) * 60000);
+
+      commute.textContent = "Leave by " +
+        departure.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      commuteDetail.textContent =
+        travel + " min estimated travel + " + buffer + " min buffer";
+
+      routeButton.style.display = meeting.venue ? "" : "none";
+    } else {
+      meetingEl.textContent = "No upcoming meetings";
+      meetingDetail.textContent = "Your schedule is clear.";
+      commute.textContent = "No commute needed";
+      commuteDetail.textContent = "No upcoming meeting found.";
+      routeButton.style.display = "none";
+    }
+
+    const gmail = panel.querySelector("#m4-inbox");
+    const list = document.querySelector("#ms-gmail-list");
+    if (list) {
+      const count = list.querySelectorAll(":scope > *").length;
+      gmail.textContent = count + (count === 1 ? " visible email" : " visible emails");
+    } else {
+      gmail.textContent = "Inbox information unavailable";
+    }
+
+    panel.querySelector("#m4-status").textContent =
+      "Briefing updated " + new Date().toLocaleTimeString([], {
+        hour: "numeric", minute: "2-digit"
+      });
+  }
+
+  function loadWeather() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return;
+
+    const weather = panel.querySelector("#m4-weather");
+    const detail = panel.querySelector("#m4-weather-detail");
+
+    if (!navigator.geolocation) {
+      weather.textContent = "Location unavailable";
+      detail.textContent = "Your browser does not support location access.";
+      return;
+    }
+
+    weather.textContent = "Finding your location...";
+    detail.textContent = "Please allow location access in your browser.";
+
+    navigator.geolocation.getCurrentPosition(async position => {
+      try {
+        const { latitude, longitude } = position.coords;
+        const url = "https://api.open-meteo.com/v1/forecast?latitude="
+          + latitude + "&longitude=" + longitude
+          + "&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m";
+
+        const response = await fetch(url);
+        if (!response.ok) throw new Error("Weather request failed");
+        const data = await response.json();
+        const current = data.current;
+
+        const descriptions = {
+          0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy",
+          3: "Overcast", 45: "Foggy", 48: "Foggy",
+          51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle",
+          61: "Light rain", 63: "Rain", 65: "Heavy rain",
+          71: "Light snow", 73: "Snow", 75: "Heavy snow",
+          80: "Rain showers", 81: "Rain showers", 82: "Heavy showers",
+          95: "Thunderstorm", 96: "Thunderstorm", 99: "Thunderstorm"
+        };
+
+        weather.textContent = Math.round(current.temperature_2m) + "°C · " +
+          (descriptions[current.weather_code] || "Current conditions");
+        detail.textContent = "Feels like " +
+          Math.round(current.apparent_temperature) + "°C · Wind " +
+          Math.round(current.wind_speed_10m) + " km/h";
+      } catch (error) {
+        weather.textContent = "Weather unavailable";
+        detail.textContent = "Please try again in a moment.";
+        console.error("MORNI weather:", error);
+      }
+    }, error => {
+      weather.textContent = "Location permission needed";
+      detail.textContent = "Allow location access and try again.";
+    }, { enableHighAccuracy: false, timeout: 12000, maximumAge: 300000 });
+  }
+
+  // Wait for the real Services page, wherever the app renders it.
+  function start() {
+    mount();
+
+    const host = document.getElementById("pageContent");
+    if (!host || window.__MORNI_V4_RECOVERY_OBSERVER__) return;
+
+    const observer = new MutationObserver(() => mount());
+    observer.observe(host, { childList: true, subtree: true });
+    window.__MORNI_V4_RECOVERY_OBSERVER__ = observer;
+  }
+
+  window.MORNI_V4_RECOVERY = { mount, update, loadWeather };
+  start();
+})();
