@@ -10031,12 +10031,43 @@ window.MORNI_V4_BRIDGE = {
     initialise();
   }
 
-  window.MORNI_V4 = {
+window.MORNI_V4 = {
     refresh,
     locate,
     loadWeather,
     calculateDeparture,
-    getMeetings
-  };
+    getMeetings,
+    mount: initialise
+};
 
+})();
+
+/* MORNI V4 — RELIABLE PAGE MOUNT FIX */
+(() => {
+  "use strict";
+
+  function tryMount() {
+    const page = document.querySelector("#pageContent .ms-page");
+
+    if (
+      page &&
+      page.querySelector("#ms-gmail-list") &&
+      !document.querySelector("#morni-v4-dashboard")
+    ) {
+      window.MORNI_V4?.mount?.();
+    }
+  }
+
+  const content = document.getElementById("pageContent");
+
+  if (content) {
+    const observer = new MutationObserver(tryMount);
+
+    observer.observe(content, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  tryMount();
 })();
