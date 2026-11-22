@@ -7329,32 +7329,80 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
 })();
 
-
 /* ============================================================
-   MORNI — MORNING INTELLIGENCE UPGRADE
-   Animated Weather + Smart Morning Briefing + Smart Commute
-   Append after all existing MORNI extensions.
+   MORNI — MORNING INTELLIGENCE UPGRADE v2
+   Smart Briefing + Weather Graphics + Smart Commute
+   Replace the previous MORNI MORNING INTELLIGENCE block.
+   Keep all other MORNI extensions.
    ============================================================ */
 
 (() => {
   "use strict";
 
   const STYLE_ID = "morni-intelligence-style";
+  const LOCATION_KEY = "morni-weather-location";
+
   let weatherLocation = null;
   let weatherData = null;
   let weatherBusy = false;
+  let lastCommuteSignature = "";
+  let dashboardObserver = null;
 
   const services = () => window.MORNI_SERVICES;
+
+  /* ----------------------------------------------------------
+     LOCATION RESTORE
+  ---------------------------------------------------------- */
+
+  try {
+    const saved = JSON.parse(
+      sessionStorage.getItem(LOCATION_KEY) || "null"
+    );
+
+    if (
+      saved &&
+      Number.isFinite(saved.lat) &&
+      Number.isFinite(saved.lon)
+    ) {
+      weatherLocation = saved;
+    }
+  } catch {}
+
+  /* ----------------------------------------------------------
+     MEETINGS
+  ---------------------------------------------------------- */
 
   function getMeetings() {
     try {
       return (services()?.getMeetings?.() || [])
-        .filter(m => new Date(m.startAt).getTime() > Date.now())
-        .sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+        .filter(meeting => {
+          const time = new Date(meeting.startAt).getTime();
+          return Number.isFinite(time) && time > Date.now();
+        })
+        .sort((a, b) =>
+          new Date(a.startAt) - new Date(b.startAt)
+        );
     } catch {
       return [];
     }
   }
+
+  function getMeetingSignature(meeting) {
+    if (!meeting) return "no-meeting";
+
+    return [
+      meeting.id,
+      meeting.title,
+      meeting.startAt,
+      meeting.venue,
+      meeting.travelMinutes,
+      meeting.bufferMinutes
+    ].join("|");
+  }
+
+  /* ----------------------------------------------------------
+     STYLES
+  ---------------------------------------------------------- */
 
   function addStyles() {
     if (document.getElementById(STYLE_ID)) return;
@@ -7397,11 +7445,12 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
       .mi-row {
         display:flex;
-        align-items:center;
+        align-items:flex-start;
         gap:12px;
         padding:11px 0;
         border-bottom:1px solid rgba(50,100,60,.12);
         font-size:13px;
+        line-height:1.55;
       }
 
       .mi-row:last-child { border-bottom:0; }
@@ -7409,6 +7458,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       .mi-dot {
         width:9px;
         height:9px;
+        margin-top:5px;
         border-radius:50%;
         flex-shrink:0;
         background:#6caa72;
@@ -7433,6 +7483,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
         font-size:67px;
         animation:mi-float 3s ease-in-out infinite;
         line-height:1;
+        flex-shrink:0;
       }
 
       .mi-temperature {
@@ -7483,7 +7534,10 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
         cursor:pointer;
       }
 
-      .mi-button.orange { background:#d58e3d; color:#263d2c; }
+      .mi-button.orange {
+        background:#d58e3d;
+        color:#263d2c;
+      }
 
       .mi-muted {
         font-size:12px;
@@ -7548,6 +7602,10 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     document.head.appendChild(style);
   }
 
+  /* ----------------------------------------------------------
+     WEATHER
+  ---------------------------------------------------------- */
+
   function weatherDescription(code) {
     if (code === 0) return ["Clear sky", "☀️"];
     if ([1,2].includes(code)) return ["Partly cloudy", "🌤️"];
@@ -7564,15 +7622,19 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     if ([95,96,99].includes(code)) {
       return "Storm conditions are possible. Check local weather alerts before travelling.";
     }
+
     if (rainChance >= 60 || [61,63,65,80,81,82].includes(code)) {
       return "Rain is likely. Consider carrying an umbrella.";
     }
+
     if ([45,48].includes(code)) {
       return "Visibility may be reduced by fog. Allow extra travel time.";
     }
+
     if (code === 0 || [1,2].includes(code)) {
-      return "A good opportunity for a bright start to your day.";
+      return "Conditions look relatively clear. Have a good day.";
     }
+
     return "Check the forecast again before heading out.";
   }
 
@@ -7591,15 +7653,21 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
           </div>
           <div class="mi-weather-icon">🌤️</div>
         </div>
-        <p class="mi-muted">Weather data comes from Open-Meteo.</p>
+        <p class="mi-muted">Weather data provided by Open-Meteo.</p>
       `;
       return;
     }
 
     const current = weatherData.current;
-    const daily = weatherData.daily;
-    const [description, icon] = weatherDescription(current.weather_code);
-    const rainChance = daily?.precipitation_probability_max?.[0] ?? 0;
+    const daily = weatherData.daily || {};
+    const [description, icon] =
+      weatherDescription(current.weather_code);
+
+    const rainChance =
+      daily.precipitation_probability_max?.[0] ?? 0;
+
+    const high = daily.temperature_2m_max?.[0];
+    const low = daily.temperature_2m_min?.[0];
 
     card.innerHTML = `
       <div class="mi-weather">
@@ -7611,7 +7679,8 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
           <strong>${description}</strong>
           <div class="mi-weather-detail">
             Feels like ${Math.round(current.apparent_temperature)}°C<br>
-            Humidity ${current.relative_humidity_2m}% · Wind ${Math.round(current.wind_speed_10m)} km/h
+            Humidity ${current.relative_humidity_2m}% ·
+            Wind ${Math.round(current.wind_speed_10m)} km/h
           </div>
         </div>
         <div class="mi-weather-icon ${
@@ -7622,12 +7691,14 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
       <div class="mi-summary">
         <strong>Today's forecast</strong><br>
-        High ${Math.round(daily.temperature_2m_max[0])}°C
-        · Low ${Math.round(daily.temperature_2m_min[0])}°C
+        ${high != null ? `High ${Math.round(high)}°C` : ""}
+        ${low != null ? ` · Low ${Math.round(low)}°C` : ""}
         · Rain probability ${rainChance}%
       </div>
 
-      <p class="mi-muted">${weatherAdvice(current.weather_code, rainChance)}</p>
+      <p class="mi-muted">
+        ${weatherAdvice(current.weather_code, rainChance)}
+      </p>
     `;
   }
 
@@ -7637,32 +7708,45 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     weatherBusy = true;
 
     try {
-      const url = new URL("https://api.open-meteo.com/v1/forecast");
+      const url = new URL(
+        "https://api.open-meteo.com/v1/forecast"
+      );
 
       url.searchParams.set("latitude", weatherLocation.lat);
       url.searchParams.set("longitude", weatherLocation.lon);
+
       url.searchParams.set(
         "current",
         "temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code"
       );
+
       url.searchParams.set(
         "daily",
         "temperature_2m_max,temperature_2m_min,precipitation_probability_max"
       );
+
       url.searchParams.set("timezone", "auto");
       url.searchParams.set("forecast_days", "1");
 
       const response = await fetch(url.toString());
-      if (!response.ok) throw new Error("Weather request failed");
+
+      if (!response.ok) {
+        throw new Error("Weather request failed");
+      }
 
       weatherData = await response.json();
+
       renderWeather();
       updateBriefing();
 
-    } catch {
+    } catch (error) {
+      console.error("MORNI weather:", error);
+
       const card = document.getElementById("mi-weather-art");
+
       if (card) {
-        card.textContent = "Weather could not refresh. Please try again.";
+        card.textContent =
+          "Weather could not refresh. Please try again.";
       }
     } finally {
       weatherBusy = false;
@@ -7670,7 +7754,17 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
   }
 
   function requestLocation() {
-    if (!navigator.geolocation) return;
+    if (weatherLocation) {
+      refreshWeather();
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      const card = document.getElementById("mi-weather-art");
+      if (card) card.textContent =
+        "Location is not supported by this browser.";
+      return;
+    }
 
     navigator.geolocation.getCurrentPosition(
       position => {
@@ -7679,16 +7773,36 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
           lon: position.coords.longitude
         };
 
+        try {
+          sessionStorage.setItem(
+            LOCATION_KEY,
+            JSON.stringify(weatherLocation)
+          );
+        } catch {}
+
         refreshWeather();
       },
-      () => {
+      error => {
+        console.warn("MORNI location:", error);
+
         const card = document.getElementById("mi-weather-art");
-        if (card) card.textContent =
-          "Location permission was not available. Enable it to load weather.";
+
+        if (card) {
+          card.textContent =
+            "Location was unavailable. Check the browser's site permission and try again.";
+        }
       },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+      {
+        enableHighAccuracy: false,
+        timeout: 15000,
+        maximumAge: 300000
+      }
     );
   }
+
+  /* ----------------------------------------------------------
+     FORMATTING
+  ---------------------------------------------------------- */
 
   function formatDate(value) {
     return new Date(value).toLocaleDateString([], {
@@ -7705,28 +7819,46 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     });
   }
 
+  /* ----------------------------------------------------------
+     SMART MORNING BRIEFING
+  ---------------------------------------------------------- */
+
   function updateBriefing() {
-    const output = document.getElementById("mi-briefing-content");
+    const output = document.getElementById(
+      "mi-briefing-content"
+    );
+
     if (!output) return;
 
     const meetings = getMeetings();
     const next = meetings[0];
 
     const inboxItems = [
-      ...document.querySelectorAll("#ms-gmail-list .ms-list-item")
+      ...document.querySelectorAll(
+        "#ms-gmail-list .ms-list-item"
+      )
     ];
 
     const newsItems = [
-      ...document.querySelectorAll("#ms-news .ms-list-item")
+      ...document.querySelectorAll(
+        "#ms-news .ms-list-item"
+      )
     ];
 
     const subjects = inboxItems.map(item =>
-      item.querySelector("strong")?.textContent || ""
-    );
+      item.querySelector("strong")?.textContent?.trim() || ""
+    ).filter(Boolean);
 
     const priorityWords = [
-      "urgent", "important", "action required",
-      "deadline", "meeting today", "reminder"
+      "urgent",
+      "important",
+      "action required",
+      "deadline",
+      "meeting today",
+      "reminder",
+      "follow up",
+      "follow-up",
+      "due today"
     ];
 
     const priorityEmails = subjects.filter(subject =>
@@ -7737,20 +7869,33 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
     const rows = [];
 
+    const now = Date.now();
+
     if (next) {
       const minutes = Math.round(
-        (new Date(next.startAt).getTime() - Date.now()) / 60000
+        (new Date(next.startAt).getTime() - now) / 60000
       );
 
       rows.push({
         icon: "📅",
-        text: `Next meeting: ${next.title} · ${formatDate(next.startAt)} at ${formatTime(next.startAt)}`
+        text:
+          `Your next meeting is "${next.title}" on ` +
+          `${formatDate(next.startAt)} at ${formatTime(next.startAt)}.`
       });
 
       if (minutes <= 120 && minutes > 0) {
         rows.push({
           icon: "⏰",
-          text: "Your next meeting is within two hours. Check your route and departure plan."
+          text:
+            "Your meeting is within two hours. " +
+            "Review its destination and departure plan."
+        });
+      } else if (minutes <= 1440) {
+        rows.push({
+          icon: "🗓️",
+          text:
+            "Your next meeting is later today. " +
+            "Check that the venue and timing are correct."
         });
       }
     } else {
@@ -7763,46 +7908,64 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     if (inboxItems.length) {
       rows.push({
         icon: "✉️",
-        text: `${inboxItems.length} recent inbox messages are loaded.`
+        text:
+          `${inboxItems.length} recent inbox messages are loaded.`
       });
     } else {
       rows.push({
         icon: "✉️",
-        text: "Gmail is not connected or no inbox messages are loaded."
+        text:
+          "No inbox messages are currently loaded. " +
+          "Connect Gmail or refresh your inbox."
       });
     }
 
     if (priorityEmails.length) {
       rows.push({
         icon: "🔔",
-        text: `${priorityEmails.length} subject line(s) contain priority words. Review them in Gmail.`
+        text:
+          `${priorityEmails.length} email subject(s) contain ` +
+          "priority keywords. Review them in your inbox."
       });
     }
 
     if (weatherData) {
       const code = weatherData.current.weather_code;
-      const rain = weatherData.daily?.precipitation_probability_max?.[0] ?? 0;
+      const rain =
+        weatherData.daily?.precipitation_probability_max?.[0] ?? 0;
 
       rows.push({
         icon: "🌤️",
-        text: `${weatherDescription(code)[0]}, ${Math.round(weatherData.current.temperature_2m)}°C. ${weatherAdvice(code, rain)}`
+        text:
+          `${weatherDescription(code)[0]}, ` +
+          `${Math.round(weatherData.current.temperature_2m)}°C. ` +
+          weatherAdvice(code, rain)
       });
     } else {
       rows.push({
         icon: "🌤️",
-        text: "Weather is not loaded yet. Share your location to include it."
+        text:
+          "Weather has not loaded. Share your location to include it."
       });
     }
 
     if (newsItems.length) {
+      const firstHeadline =
+        newsItems[0].textContent?.trim().replace(/\s+/g, " ");
+
       rows.push({
         icon: "📰",
-        text: `${newsItems.length} news headlines are available in MORNI.`
+        text:
+          `${newsItems.length} news headlines are available.` +
+          (firstHeadline
+            ? ` Top headline: ${firstHeadline.slice(0, 150)}`
+            : "")
       });
     } else {
       rows.push({
         icon: "📰",
-        text: "No news headlines are loaded yet. Choose a region in Daily News."
+        text:
+          "No news headlines are loaded. Choose a region in Daily News."
       });
     }
 
@@ -7816,28 +7979,49 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       dot.className = "mi-dot";
 
       const text = document.createElement("span");
-      text.textContent = row.icon + "  " + row.text;
+      text.textContent = `${row.icon}  ${row.text}`;
 
       item.append(dot, text);
       output.appendChild(item);
     });
 
     const greeting = document.getElementById("mi-greeting");
+
     if (greeting) {
       const hour = new Date().getHours();
+
       greeting.textContent =
         hour < 12 ? "Good morning." :
-        hour < 17 ? "Good afternoon." : "Good evening.";
+        hour < 17 ? "Good afternoon." :
+        "Good evening.";
     }
   }
 
-  function renderCommute() {
-    const output = document.getElementById("mi-commute-content");
+  /* ----------------------------------------------------------
+     SMART COMMUTE
+  ---------------------------------------------------------- */
+
+  function renderCommute(force = false) {
+    const output = document.getElementById(
+      "mi-commute-content"
+    );
+
     if (!output) return;
 
     const next = getMeetings()[0];
+    const signature = getMeetingSignature(next);
+
+    if (
+      !force &&
+      output.dataset.meetingId === signature &&
+      output.childElementCount > 0
+    ) {
+      return;
+    }
 
     output.replaceChildren();
+    output.dataset.meetingId = signature;
+    lastCommuteSignature = signature;
 
     if (!next) {
       output.textContent =
@@ -7846,12 +8030,13 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     }
 
     const title = document.createElement("strong");
-    title.textContent = next.title;
+    title.textContent = next.title || "Upcoming meeting";
 
     const details = document.createElement("p");
     details.className = "mi-muted";
     details.textContent =
-      `${formatDate(next.startAt)} · ${formatTime(next.startAt)} · ${next.venue || "Destination missing"}`;
+      `${formatDate(next.startAt)} · ${formatTime(next.startAt)} · ` +
+      `${next.venue || "Destination missing"}`;
 
     const travel = document.createElement("input");
     travel.className = "mi-input";
@@ -7874,6 +8059,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     const result = document.createElement("div");
     result.className = "mi-result";
     result.id = "mi-commute-result";
+
     result.textContent =
       "Enter your estimated travel time and buffer to calculate when to leave.";
 
@@ -7891,6 +8077,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     directions.dataset.miAction = "directions";
 
     actions.append(calculate, directions);
+
     output.append(title, details);
 
     if (!next.venue) {
@@ -7902,35 +8089,49 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     }
 
     output.append(travel, buffer, actions, result);
-    output.dataset.meetingId = next.id;
   }
 
   function calculateDeparture() {
     const next = getMeetings()[0];
     if (!next) return;
 
-    const travel = Math.max(0, Math.min(600,
-      Number(document.getElementById("mi-travel-time")?.value || 0)
-    ));
+    const travelInput =
+      document.getElementById("mi-travel-time");
 
-    const buffer = Math.max(0, Math.min(180,
-      Number(document.getElementById("mi-buffer-time")?.value || 0)
-    ));
+    const bufferInput =
+      document.getElementById("mi-buffer-time");
+
+    const travel = Math.max(
+      0,
+      Math.min(600, Number(travelInput?.value || 0))
+    );
+
+    const buffer = Math.max(
+      0,
+      Math.min(180, Number(bufferInput?.value || 0))
+    );
 
     const departure = new Date(
       new Date(next.startAt).getTime() -
       (travel + buffer) * 60000
     );
 
-    const result = document.getElementById("mi-commute-result");
+    const result = document.getElementById(
+      "mi-commute-result"
+    );
+
     if (!result) return;
 
     if (departure.getTime() < Date.now()) {
       result.textContent =
-        "Your calculated departure time has already passed. Check the meeting time and estimates.";
+        "Your calculated departure time has already passed. " +
+        "Check the meeting time and estimates.";
     } else {
       result.textContent =
-        `Suggested departure: ${formatDate(departure)} at ${formatTime(departure)}. This includes ${travel} minutes of travel and ${buffer} minutes of buffer. Travel time is your estimate, not live traffic.`;
+        `Suggested departure: ${formatDate(departure)} at ` +
+        `${formatTime(departure)}. This includes ${travel} minutes ` +
+        `of estimated travel and ${buffer} minutes of buffer. ` +
+        "This is an estimate, not live traffic data.";
     }
   }
 
@@ -7943,6 +8144,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     }
 
     const url = new URL("https://www.google.com/maps/dir/");
+
     url.searchParams.set("api", "1");
     url.searchParams.set("destination", next.venue);
     url.searchParams.set("travelmode", "driving");
@@ -7954,11 +8156,32 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       );
     }
 
-    window.open(url.toString(), "_blank", "noopener,noreferrer");
+    window.open(
+      url.toString(),
+      "_blank",
+      "noopener,noreferrer"
+    );
+  }
+
+  /* ----------------------------------------------------------
+     DASHBOARD FINDER
+  ---------------------------------------------------------- */
+
+  function findServicesPage() {
+    const direct = document.querySelector(
+      "#morni-services-panel .ms-page"
+    );
+
+    if (direct) return direct;
+
+    return [...document.querySelectorAll(".ms-page")].find(page =>
+      page.querySelector("#ms-weather") &&
+      page.querySelector("#ms-gmail-list")
+    ) || null;
   }
 
   function ensureDashboard() {
-    const page = document.querySelector("#morni-services-panel .ms-page");
+    const page = findServicesPage();
     if (!page) return;
 
     addStyles();
@@ -7966,28 +8189,32 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     const hero = page.querySelector(".ms-hero");
     if (!hero) return;
 
-    if (!document.getElementById("mi-briefing")) {
+    if (!page.querySelector("#mi-briefing")) {
       const briefing = document.createElement("section");
+
       briefing.id = "mi-briefing";
       briefing.className = "mi-card";
 
       briefing.innerHTML = `
-        <div class="mi-kicker">YOUR PERSONAL MORNING INTELLIGENCE</div>
+        <div class="mi-kicker">
+          YOUR PERSONAL MORNING INTELLIGENCE
+        </div>
         <h2 id="mi-greeting">Good morning.</h2>
         <p class="mi-muted">
-          MORNI brings together the information currently available to it.
+          Your meetings, inbox, weather and news — brought together.
         </p>
         <div id="mi-briefing-content"></div>
         <p class="mi-muted">
-          Briefing updates as connected information becomes available.
+          MORNI updates this briefing as connected information becomes available.
         </p>
       `;
 
       hero.insertAdjacentElement("afterend", briefing);
     }
 
-    if (!document.getElementById("mi-commute")) {
+    if (!page.querySelector("#mi-commute")) {
       const commute = document.createElement("section");
+
       commute.id = "mi-commute";
       commute.className = "mi-card";
 
@@ -7995,65 +8222,159 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
         <div class="mi-kicker">PLAN AHEAD</div>
         <h2>Smart Commute Assistant</h2>
         <p class="mi-muted">
-          Plan when to leave for your next recorded meeting.
+          Calculate when to leave for your next recorded meeting.
         </p>
         <div id="mi-commute-content"></div>
       `;
 
-      const briefing = document.getElementById("mi-briefing");
-      briefing.insertAdjacentElement("afterend", commute);
+      page.querySelector("#mi-briefing")
+        .insertAdjacentElement("afterend", commute);
     }
 
     const weatherCard = [...page.querySelectorAll(".ms-card")]
       .find(card => card.querySelector("#ms-weather"));
 
-    if (weatherCard && !document.getElementById("mi-weather-art")) {
+    if (
+      weatherCard &&
+      !weatherCard.querySelector("#mi-weather-art")
+    ) {
       const art = document.createElement("div");
       art.id = "mi-weather-art";
+
       weatherCard.querySelector("#ms-weather")
         .insertAdjacentElement("beforebegin", art);
-
-      renderWeather();
     }
 
+    renderWeather();
     updateBriefing();
     renderCommute();
   }
 
-  document.addEventListener("click", event => {
-    const action = event.target.closest("[data-mi-action]")?.dataset.miAction;
-    if (!action) return;
+  /* ----------------------------------------------------------
+     ACTIONS
+  ---------------------------------------------------------- */
 
-    if (action === "calculate") calculateDeparture();
-    if (action === "directions") openDirections();
+  document.addEventListener("click", event => {
+    const target = event.target.closest("[data-mi-action]");
+    if (!target) return;
+
+    const action = target.dataset.miAction;
+
+    if (action === "calculate") {
+      calculateDeparture();
+    }
+
+    if (action === "directions") {
+      openDirections();
+    }
   });
 
+  // Capture location clicks before the older Services handler.
+  // This prevents two separate geolocation requests.
   document.addEventListener("click", event => {
-    const action = event.target.closest("[data-action]")?.dataset.action;
+    const button = event.target.closest(
+      '[data-action="locate"]'
+    );
 
-    if (action === "locate") {
-      setTimeout(requestLocation, 1000);
-    }
+    if (!button) return;
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+
+    requestLocation();
+  }, true);
+
+  document.addEventListener("click", event => {
+    const button = event.target.closest("[data-action]");
+    if (!button) return;
+
+    const action = button.dataset.action;
 
     if (action === "weather") {
-      setTimeout(refreshWeather, 1000);
+      setTimeout(refreshWeather, 100);
     }
 
-    if (action === "departure" || action === "remove") {
+    if (
+      action === "departure" ||
+      action === "remove"
+    ) {
       setTimeout(() => {
-        renderCommute();
+        renderCommute(true);
         updateBriefing();
-      }, 100);
+      }, 150);
+    }
+
+    if (action === "refresh") {
+      setTimeout(updateBriefing, 500);
     }
   });
 
-  // Keep the briefing current while Connected Services is open.
+  /* ----------------------------------------------------------
+     PAGE CHANGE DETECTION
+     Rebuild only when MORNI changes the actual page DOM.
+  ---------------------------------------------------------- */
+
+  function startObserver() {
+    if (dashboardObserver || !document.body) return;
+
+    dashboardObserver = new MutationObserver(() => {
+      if (!findServicesPage()) return;
+
+      ensureDashboard();
+    });
+
+    dashboardObserver.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+  }
+
+  /* ----------------------------------------------------------
+     INITIALISE
+  ---------------------------------------------------------- */
+
+  addStyles();
+  startObserver();
+
+  // Retry briefly while the Connected Services interface loads.
+  let attempts = 0;
+
+  const startup = setInterval(() => {
+    attempts++;
+    ensureDashboard();
+
+    if (findServicesPage() || attempts >= 20) {
+      clearInterval(startup);
+    }
+  }, 500);
+
+  // Refresh the briefing periodically without rebuilding commute inputs.
   setInterval(() => {
     ensureDashboard();
     updateBriefing();
-    renderCommute();
-  }, 5000);
 
-  console.info("MORNI Morning Intelligence loaded.");
+    const nextSignature =
+      getMeetingSignature(getMeetings()[0]);
+
+    if (nextSignature !== lastCommuteSignature) {
+      renderCommute(true);
+    }
+  }, 10000);
+
+  // Restore weather automatically when a previously shared location exists.
+  if (weatherLocation) {
+    setTimeout(refreshWeather, 800);
+  }
+
+  window.MORNI_INTELLIGENCE = {
+    refresh: ensureDashboard,
+    refreshBriefing: updateBriefing,
+    refreshWeather,
+    locate: requestLocation,
+    refreshCommute: () => renderCommute(true)
+  };
+
+  console.info("MORNI Morning Intelligence v2 loaded.");
 })();
+
 
