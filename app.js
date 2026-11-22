@@ -5574,3 +5574,77 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
   console.info("MORNI responsive and sunrise branding loaded.");
 
 })();
+
+/* ==========================================
+   MORNI — DARK MODE READABILITY PATCH
+   Paste at the VERY BOTTOM of app.js
+========================================== */
+
+(() => {
+  const morniDarkFix = document.createElement("style");
+
+  morniDarkFix.id = "morni-dark-readability-fix";
+
+  morniDarkFix.textContent = `
+    body[data-theme="dark"] #pageContent .profile-level {
+      background: #294633 !important;
+      color: #f2f7ed !important;
+      border: 1px solid #527653 !important;
+    }
+
+    body[data-theme="dark"] #pageContent .level-showcase,
+    body[data-theme="dark"] #pageContent .level-info {
+      color: #eef4e9 !important;
+    }
+
+    body[data-theme="dark"] #pageContent .level-orb {
+      background: linear-gradient(145deg, #d5edaa, #76ad78) !important;
+      color: #173d29 !important;
+      border: 2px solid #8fbd83 !important;
+    }
+
+    body[data-theme="dark"] #pageContent .morni-glass-panel,
+    body[data-theme="dark"] #pageContent .feature-card,
+    body[data-theme="dark"] #pageContent .reward-item,
+    body[data-theme="dark"] #pageContent .readiness-signal,
+    body[data-theme="dark"] #pageContent .planner-task-row,
+    body[data-theme="dark"] #pageContent .morni-score-card,
+    body[data-theme="dark"] #pageContent .morni-water-card {
+      background: #1c2b21 !important;
+      color: #eef4e9 !important;
+      border-color: #3b5140 !important;
+    }
+
+    body[data-theme="dark"] #pageContent input,
+    body[data-theme="dark"] #pageContent select,
+    body[data-theme="dark"] #pageContent textarea {
+      background: #17251c !important;
+      color: #eef4e9 !important;
+      border-color: #405744 !important;
+    }
+
+    body[data-theme="dark"] #pageContent input::placeholder,
+    body[data-theme="dark"] #pageContent textarea::placeholder {
+      color: #a9bbaa !important;
+      opacity: 1;
+    }
+
+    body[data-theme="dark"] #pageContent .morni-water-card {
+      background: linear-gradient(145deg, #203729, #263d2d) !important;
+    }
+
+    body[data-theme="dark"] #pageContent .morni-nudge-card {
+      background: linear-gradient(110deg, #263528, #302e22) !important;
+      border-color: #526147 !important;
+      color: #edf4e8 !important;
+    }
+
+    body[data-theme="dark"] #pageContent .morni-nudge-card h3,
+    body[data-theme="dark"] #pageContent .morni-nudge-card p {
+      color: #edf4e8 !important;
+    }
+  `;
+
+  document.getElementById("morni-dark-readability-fix")?.remove();
+  document.head.appendChild(morniDarkFix);
+})();
