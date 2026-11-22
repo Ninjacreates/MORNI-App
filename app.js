@@ -5648,3 +5648,486 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
   document.getElementById("morni-dark-readability-fix")?.remove();
   document.head.appendChild(morniDarkFix);
 })();
+
+/* ==========================================================
+   MORNI SERVICES EXTENSION
+   Gmail + Weather + Google Maps + Local News
+   Add this at the VERY BOTTOM of app.js
+   ========================================================== */
+
+(() => {
+  "use strict";
+
+  // Your Google OAuth Web Client ID
+  const GOOGLE_CLIENT_ID =
+    "367611240198-lukr25vboivbmgcodmpeb6lhibeje432.apps.googleusercontent.com";
+
+  const GMAIL_SCOPE =
+    "https://www.googleapis.com/auth/gmail.readonly";
+
+  let gmailToken = null;
+  let tokenClient = null;
+  let userLocation = null;
+  let previousMailIds = new Set();
+  let gmailPolling = null;
+
+  const style = document.createElement("style");
+  style.textContent = `
+    #morni-services-button {
+      position:fixed; right:20px; bottom:20px; z-index:99990;
+      background:#218653; color:white; border:2px solid #f5a623;
+      border-radius:30px; padding:13px 20px; font-weight:800;
+      cursor:pointer; box-shadow:0 5px 20px #0003;
+      font-size:14px;
+    }
+    #morni-services-overlay {
+      display:none; position:fixed; inset:0; z-index:99999;
+      background:#0009; align-items:center; justify-content:center;
+      padding:12px; font-family:Arial,sans-serif;
+    }
+    #morni-services-panel {
+      width:min(720px,100%); max-height:90vh; overflow:auto;
+      background:var(--card,#fff); color:var(--text,#222);
+      border:2px solid #218653; border-radius:20px; padding:20px;
+      box-shadow:0 15px 50px #0005;
+    }
+    #morni-services-panel h2 { color:#218653; margin-top:0; }
+    .morni-service-section {
+      border:1px solid #21865355; border-radius:13px;
+      padding:14px; margin:13px 0;
+    }
+    .morni-service-section h3 { margin:0 0 10px; }
+    .morni-service-button {
+      background:#218653; color:white; border:0;
+      border-radius:9px; padding:10px 14px;
+      font-weight:700; cursor:pointer; margin:4px 3px;
+    }
+    .morni-service-input {
+      width:100%; box-sizing:border-box; padding:11px;
+      border:1px solid #aaa; border-radius:8px;
+      margin:5px 0; background:var(--input-bg,#fff);
+      color:var(--text,#222);
+    }
+    .morni-service-message {
+      font-size:13px; opacity:.8; margin-top:8px;
+    }
+    .morni-mail-item,.morni-news-item {
+      padding:10px; border-bottom:1px solid #9995;
+      overflow-wrap:anywhere;
+    }
+    .morni-mail-item strong,.morni-news-item strong {
+      display:block; margin-bottom:4px;
+    }
+    #morni-services-close {
+      float:right; background:#d66b22; color:white;
+      border:0; border-radius:8px; padding:8px 12px;
+      cursor:pointer;
+    }
+    #morni-services-toast {
+      position:fixed; bottom:80px; right:20px;
+      z-index:100000; background:#218653; color:white;
+      padding:13px 17px; border-radius:12px;
+      display:none; max-width:280px; box-shadow:0 4px 15px #0004;
+    }
+  `;
+  document.head.appendChild(style);
+
+  const button = document.createElement("button");
+  button.id = "morni-services-button";
+  button.textContent = "🌿 MORNI Services";
+  document.body.appendChild(button);
+
+  const overlay = document.createElement("div");
+  overlay.id = "morni-services-overlay";
+  overlay.innerHTML = `
+    <div id="morni-services-panel">
+      <button id="morni-services-close">✕ Close</button>
+      <h2>🌿 MORNI Services</h2>
+      <p>Your morning, connected.</p>
+
+      <section class="morni-service-section">
+        <h3>📍 Your Location</h3>
+        <p id="morni-location-status">Location not yet requested.</p>
+        <button class="morni-service-button" id="morni-locate">
+          Find My Location
+        </button>
+        <button class="morni-service-button" id="morni-map">
+          Open Google Maps
+        </button>
+      </section>
+
+      <section class="morni-service-section">
+        <h3>🌤️ Local Weather</h3>
+        <div id="morni-weather-result">Find your location to load weather.</div>
+        <button class="morni-service-button" id="morni-weather-refresh">
+          Refresh Weather
+        </button>
+      </section>
+
+      <section class="morni-service-section">
+        <h3>📧 Gmail Inbox</h3>
+        <p id="morni-gmail-status">Not connected.</p>
+        <button class="morni-service-button" id="morni-gmail-connect">
+          Connect Gmail
+        </button>
+        <button class="morni-service-button" id="morni-gmail-refresh">
+          Refresh Inbox
+        </button>
+        <div id="morni-gmail-list"></div>
+      </section>
+
+      <section class="morni-service-section">
+        <h3>📰 Local Daily News</h3>
+        <input class="morni-service-input" id="morni-news-city"
+          placeholder="Enter your city or region" value="Kerala">
+        <button class="morni-service-button" id="morni-news-load">
+          Load News
+        </button>
+        <div id="morni-news-result">Enter a region and load headlines.</div>
+      </section>
+
+      <p class="morni-service-message">
+        Gmail access is read-only. Location is requested only when you
+        press the location button.
+      </p>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const toast = document.createElement("div");
+  toast.id = "morni-services-toast";
+  document.body.appendChild(toast);
+
+  const $ = id => document.getElementById(id);
+
+  function message(text) {
+    toast.textContent = text;
+    toast.style.display = "block";
+    clearTimeout(message.timer);
+    message.timer = setTimeout(() => {
+      toast.style.display = "none";
+    }, 4500);
+  }
+
+  button.addEventListener("click", () => {
+    overlay.style.display = "flex";
+  });
+
+  $("morni-services-close").addEventListener("click", () => {
+    overlay.style.display = "none";
+  });
+
+  overlay.addEventListener("click", event => {
+    if (event.target === overlay) overlay.style.display = "none";
+  });
+
+  // LOCATION
+  function locate() {
+    if (!navigator.geolocation) {
+      $("morni-location-status").textContent =
+        "Your browser does not support location.";
+      return;
+    }
+
+    $("morni-location-status").textContent =
+      "Requesting location permission...";
+
+    navigator.geolocation.getCurrentPosition(
+      position => {
+        userLocation = {
+          lat: position.coords.latitude,
+          lon: position.coords.longitude
+        };
+
+        $("morni-location-status").textContent =
+          "Location found successfully.";
+
+        loadWeather();
+      },
+      error => {
+        $("morni-location-status").textContent =
+          "Location unavailable. Please allow location permission.";
+      },
+      { enableHighAccuracy: true, timeout: 15000 }
+    );
+  }
+
+  $("morni-locate").addEventListener("click", locate);
+
+  $("morni-map").addEventListener("click", () => {
+    if (!userLocation) {
+      message("Find your location first.");
+      return;
+    }
+
+    const url =
+      "https://www.google.com/maps/search/?api=1&query=" +
+      userLocation.lat + "," + userLocation.lon;
+
+    window.open(url, "_blank", "noopener");
+  });
+
+  // WEATHER: Open-Meteo, no API key needed
+  async function loadWeather() {
+    if (!userLocation) {
+      $("morni-weather-result").textContent =
+        "Find your location first.";
+      return;
+    }
+
+    $("morni-weather-result").textContent = "Loading weather...";
+
+    try {
+      const url =
+        "https://api.open-meteo.com/v1/forecast?latitude=" +
+        userLocation.lat +
+        "&longitude=" + userLocation.lon +
+        "&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m";
+
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Weather service unavailable");
+
+      const data = await response.json();
+      const weather = data.current;
+
+      $("morni-weather-result").innerHTML = `
+        <h2>${Math.round(weather.temperature_2m)}°C</h2>
+        <p>Feels like: ${Math.round(weather.apparent_temperature)}°C</p>
+        <p>Humidity: ${weather.relative_humidity_2m}%</p>
+        <p>Wind speed: ${weather.wind_speed_10m} km/h</p>
+      `;
+    } catch (error) {
+      $("morni-weather-result").textContent =
+        "Could not load weather. Please try again.";
+    }
+  }
+
+  $("morni-weather-refresh").addEventListener("click", loadWeather);
+
+  // GMAIL
+  function loadGoogleIdentity() {
+    return new Promise((resolve, reject) => {
+      if (window.google?.accounts?.oauth2) {
+        resolve();
+        return;
+      }
+
+      const existing = document.querySelector(
+        'script[src="https://accounts.google.com/gsi/client"]'
+      );
+
+      if (existing) {
+        existing.addEventListener("load", resolve, { once: true });
+        existing.addEventListener("error", reject, { once: true });
+        return;
+      }
+
+      const script = document.createElement("script");
+      script.src = "https://accounts.google.com/gsi/client";
+      script.onload = resolve;
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+  }
+
+  async function connectGmail() {
+    $("morni-gmail-status").textContent =
+      "Preparing Google sign-in...";
+
+    try {
+      await loadGoogleIdentity();
+
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: GOOGLE_CLIENT_ID,
+        scope: GMAIL_SCOPE,
+        callback: async response => {
+          if (response.error) {
+            $("morni-gmail-status").textContent =
+              "Google sign-in failed. Please try again.";
+            return;
+          }
+
+          gmailToken = response.access_token;
+          $("morni-gmail-status").textContent =
+            "Gmail connected.";
+
+          previousMailIds = new Set();
+          await loadGmail();
+
+          if (gmailPolling) clearInterval(gmailPolling);
+          gmailPolling = setInterval(loadGmail, 20000);
+        }
+      });
+
+      tokenClient.requestAccessToken();
+    } catch (error) {
+      $("morni-gmail-status").textContent =
+        "Could not load Google sign-in.";
+    }
+  }
+
+  async function loadGmail() {
+    if (!gmailToken) {
+      $("morni-gmail-status").textContent =
+        "Connect Gmail first.";
+      return;
+    }
+
+    $("morni-gmail-status").textContent = "Checking inbox...";
+
+    try {
+      const response = await fetch(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10&labelIds=INBOX",
+        { headers: { Authorization: "Bearer " + gmailToken } }
+      );
+
+      if (response.status === 401) {
+        gmailToken = null;
+        clearInterval(gmailPolling);
+        $("morni-gmail-status").textContent =
+          "Session expired. Please reconnect Gmail.";
+        return;
+      }
+
+      if (!response.ok) throw new Error("Gmail request failed");
+
+      const data = await response.json();
+      const messages = data.messages || [];
+      const currentIds = new Set(messages.map(mail => mail.id));
+
+      if (previousMailIds.size > 0) {
+        const newMessages = messages.filter(
+          mail => !previousMailIds.has(mail.id)
+        );
+
+        if (newMessages.length > 0) {
+          message("📧 You have a new email!");
+        }
+      }
+
+      previousMailIds = currentIds;
+
+      const details = await Promise.all(
+        messages.slice(0, 10).map(async mail => {
+          const result = await fetch(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/" +
+            mail.id + "?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date",
+            { headers: { Authorization: "Bearer " + gmailToken } }
+          );
+
+          if (!result.ok) return null;
+          return result.json();
+        })
+      );
+
+      $("morni-gmail-list").innerHTML = "";
+
+      if (!details.filter(Boolean).length) {
+        $("morni-gmail-list").textContent = "Your inbox is empty.";
+      }
+
+      details.filter(Boolean).forEach(mail => {
+        const headers = mail.payload?.headers || [];
+        const getHeader = name =>
+          headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value
+          || "Not available";
+
+        const item = document.createElement("div");
+        item.className = "morni-mail-item";
+
+        const subject = document.createElement("strong");
+        subject.textContent = getHeader("Subject");
+
+        const from = document.createElement("div");
+        from.textContent = "From: " + getHeader("From");
+
+        const date = document.createElement("small");
+        date.textContent = getHeader("Date");
+
+        item.append(subject, from, date);
+        $("morni-gmail-list").appendChild(item);
+      });
+
+      $("morni-gmail-status").textContent =
+        "Connected · Showing latest inbox messages.";
+    } catch (error) {
+      $("morni-gmail-status").textContent =
+        "Could not load inbox. Try refreshing or reconnecting.";
+    }
+  }
+
+  $("morni-gmail-connect").addEventListener("click", connectGmail);
+  $("morni-gmail-refresh").addEventListener("click", loadGmail);
+
+  // NEWS: Google News RSS through RSS2JSON
+  async function loadNews() {
+    const city = $("morni-news-city").value.trim();
+
+    if (!city) {
+      $("morni-news-result").textContent =
+        "Please enter a city or region.";
+      return;
+    }
+
+    $("morni-news-result").textContent = "Loading local news...";
+
+    try {
+      const rssUrl =
+        "https://news.google.com/rss/search?q=" +
+        encodeURIComponent(city) +
+        "&hl=en-IN&gl=IN&ceid=IN:en";
+
+      const converter =
+        "https://api.rss2json.com/v1/api.json?rss_url=" +
+        encodeURIComponent(rssUrl);
+
+      const response = await fetch(converter);
+      if (!response.ok) throw new Error("News service unavailable");
+
+      const data = await response.json();
+      if (data.status !== "ok") throw new Error("News feed unavailable");
+
+      $("morni-news-result").innerHTML = "";
+
+      (data.items || []).slice(0, 8).forEach(article => {
+        const item = document.createElement("div");
+        item.className = "morni-news-item";
+
+        const title = document.createElement("strong");
+        title.textContent = article.title || "News headline";
+
+        const date = document.createElement("small");
+        date.textContent = article.pubDate || "";
+
+        const link = document.createElement("a");
+        link.textContent = "Read article";
+        link.href = article.link;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+
+        item.append(title, date, document.createElement("br"), link);
+        $("morni-news-result").appendChild(item);
+      });
+
+      if (!data.items?.length) {
+        $("morni-news-result").textContent =
+          "No news articles found for this region.";
+      }
+    } catch (error) {
+      $("morni-news-result").textContent =
+        "News could not load right now. Please try again later.";
+    }
+  }
+
+  $("morni-news-load").addEventListener("click", loadNews);
+
+  // Public controls for future MORNI extensions
+  window.MORNI_SERVICES = {
+    open: () => overlay.style.display = "flex",
+    locate,
+    refreshWeather: loadWeather,
+    refreshGmail: loadGmail,
+    refreshNews: loadNews
+  };
+
+})();
