@@ -7329,3 +7329,731 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
 })();
 
+
+/* ============================================================
+   MORNI — MORNING INTELLIGENCE UPGRADE
+   Animated Weather + Smart Morning Briefing + Smart Commute
+   Append after all existing MORNI extensions.
+   ============================================================ */
+
+(() => {
+  "use strict";
+
+  const STYLE_ID = "morni-intelligence-style";
+  let weatherLocation = null;
+  let weatherData = null;
+  let weatherBusy = false;
+
+  const services = () => window.MORNI_SERVICES;
+
+  function getMeetings() {
+    try {
+      return (services()?.getMeetings?.() || [])
+        .filter(m => new Date(m.startAt).getTime() > Date.now())
+        .sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+    } catch {
+      return [];
+    }
+  }
+
+  function addStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+
+    style.textContent = `
+      .mi-card {
+        border:1px solid rgba(67,120,76,.18);
+        border-radius:20px;
+        padding:20px;
+        margin:18px 0;
+        background:linear-gradient(135deg,#fffef8,#edf5e9);
+        color:#254832;
+        box-shadow:0 8px 25px rgba(35,75,45,.045);
+      }
+
+      .mi-kicker {
+        font-size:10px;
+        letter-spacing:1.7px;
+        font-weight:900;
+        color:#9a713c;
+      }
+
+      .mi-card h2 {
+        margin:7px 0;
+        font-size:20px;
+        color:#285b3b;
+      }
+
+      .mi-summary {
+        padding:12px 14px;
+        margin:10px 0;
+        border-radius:12px;
+        background:rgba(54,112,67,.07);
+        line-height:1.6;
+        font-size:13px;
+      }
+
+      .mi-row {
+        display:flex;
+        align-items:center;
+        gap:12px;
+        padding:11px 0;
+        border-bottom:1px solid rgba(50,100,60,.12);
+        font-size:13px;
+      }
+
+      .mi-row:last-child { border-bottom:0; }
+
+      .mi-dot {
+        width:9px;
+        height:9px;
+        border-radius:50%;
+        flex-shrink:0;
+        background:#6caa72;
+      }
+
+      .mi-weather {
+        position:relative;
+        overflow:hidden;
+        min-height:145px;
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:12px;
+        padding:17px;
+        margin:13px 0;
+        border-radius:17px;
+        background:linear-gradient(125deg,#dcefdc,#f7e8c9);
+        color:#244b35;
+      }
+
+      .mi-weather-icon {
+        font-size:67px;
+        animation:mi-float 3s ease-in-out infinite;
+        line-height:1;
+      }
+
+      .mi-temperature {
+        font-size:43px;
+        font-weight:950;
+        letter-spacing:-2px;
+      }
+
+      .mi-weather-detail {
+        font-size:12px;
+        line-height:1.7;
+        opacity:.85;
+      }
+
+      .mi-weather-sun {
+        animation:mi-spin 18s linear infinite;
+      }
+
+      .mi-weather-rain {
+        animation:mi-rain 1s ease-in-out infinite alternate;
+      }
+
+      .mi-input {
+        width:100%;
+        box-sizing:border-box;
+        margin:7px 0;
+        padding:11px;
+        border:1px solid #cad9c8;
+        border-radius:10px;
+        background:#fffdf7;
+        color:#244832;
+      }
+
+      .mi-actions {
+        display:flex;
+        flex-wrap:wrap;
+        gap:8px;
+        margin-top:12px;
+      }
+
+      .mi-button {
+        border:0;
+        border-radius:10px;
+        padding:11px 15px;
+        background:#306b45;
+        color:white;
+        font-weight:800;
+        cursor:pointer;
+      }
+
+      .mi-button.orange { background:#d58e3d; color:#263d2c; }
+
+      .mi-muted {
+        font-size:12px;
+        line-height:1.6;
+        color:#718174;
+      }
+
+      .mi-result {
+        margin-top:12px;
+        padding:12px;
+        border-radius:11px;
+        background:rgba(55,111,67,.08);
+        font-size:13px;
+        line-height:1.6;
+      }
+
+      body[data-theme="dark"] .mi-card {
+        background:linear-gradient(135deg,#1b3023,#243b2b);
+        color:#edf5e9;
+        border-color:#405d45;
+      }
+
+      body[data-theme="dark"] .mi-card h2 {
+        color:#c4dfbd;
+      }
+
+      body[data-theme="dark"] .mi-summary,
+      body[data-theme="dark"] .mi-result {
+        background:rgba(180,220,170,.09);
+      }
+
+      body[data-theme="dark"] .mi-weather {
+        background:linear-gradient(125deg,#314c3a,#594b35);
+        color:#f2f5e9;
+      }
+
+      body[data-theme="dark"] .mi-input {
+        background:#17281d;
+        color:#edf5e9;
+        border-color:#526b55;
+      }
+
+      @keyframes mi-float {
+        0%,100% { transform:translateY(0); }
+        50% { transform:translateY(-8px); }
+      }
+
+      @keyframes mi-spin {
+        to { transform:rotate(360deg); }
+      }
+
+      @keyframes mi-rain {
+        from { transform:translateY(-3px); }
+        to { transform:translateY(5px); }
+      }
+
+      @media(prefers-reduced-motion:reduce) {
+        .mi-weather-icon { animation:none !important; }
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  function weatherDescription(code) {
+    if (code === 0) return ["Clear sky", "☀️"];
+    if ([1,2].includes(code)) return ["Partly cloudy", "🌤️"];
+    if (code === 3) return ["Overcast", "☁️"];
+    if ([45,48].includes(code)) return ["Foggy", "🌫️"];
+    if ([51,53,55,56,57].includes(code)) return ["Drizzle", "🌦️"];
+    if ([61,63,65,66,67,80,81,82].includes(code)) return ["Rain", "🌧️"];
+    if ([71,73,75,77,85,86].includes(code)) return ["Snow", "❄️"];
+    if ([95,96,99].includes(code)) return ["Thunderstorm", "⛈️"];
+    return ["Current conditions", "🌤️"];
+  }
+
+  function weatherAdvice(code, rainChance) {
+    if ([95,96,99].includes(code)) {
+      return "Storm conditions are possible. Check local weather alerts before travelling.";
+    }
+    if (rainChance >= 60 || [61,63,65,80,81,82].includes(code)) {
+      return "Rain is likely. Consider carrying an umbrella.";
+    }
+    if ([45,48].includes(code)) {
+      return "Visibility may be reduced by fog. Allow extra travel time.";
+    }
+    if (code === 0 || [1,2].includes(code)) {
+      return "A good opportunity for a bright start to your day.";
+    }
+    return "Check the forecast again before heading out.";
+  }
+
+  function renderWeather() {
+    const card = document.getElementById("mi-weather-art");
+    if (!card) return;
+
+    if (!weatherData) {
+      card.innerHTML = `
+        <div class="mi-weather">
+          <div>
+            <strong>Weather awaits</strong>
+            <p class="mi-weather-detail">
+              Share your location to see your illustrated forecast.
+            </p>
+          </div>
+          <div class="mi-weather-icon">🌤️</div>
+        </div>
+        <p class="mi-muted">Weather data comes from Open-Meteo.</p>
+      `;
+      return;
+    }
+
+    const current = weatherData.current;
+    const daily = weatherData.daily;
+    const [description, icon] = weatherDescription(current.weather_code);
+    const rainChance = daily?.precipitation_probability_max?.[0] ?? 0;
+
+    card.innerHTML = `
+      <div class="mi-weather">
+        <div>
+          <div class="mi-kicker">YOUR LOCAL WEATHER</div>
+          <div class="mi-temperature">
+            ${Math.round(current.temperature_2m)}°C
+          </div>
+          <strong>${description}</strong>
+          <div class="mi-weather-detail">
+            Feels like ${Math.round(current.apparent_temperature)}°C<br>
+            Humidity ${current.relative_humidity_2m}% · Wind ${Math.round(current.wind_speed_10m)} km/h
+          </div>
+        </div>
+        <div class="mi-weather-icon ${
+          icon === "☀️" ? "mi-weather-sun" :
+          icon === "🌧️" ? "mi-weather-rain" : ""
+        }">${icon}</div>
+      </div>
+
+      <div class="mi-summary">
+        <strong>Today's forecast</strong><br>
+        High ${Math.round(daily.temperature_2m_max[0])}°C
+        · Low ${Math.round(daily.temperature_2m_min[0])}°C
+        · Rain probability ${rainChance}%
+      </div>
+
+      <p class="mi-muted">${weatherAdvice(current.weather_code, rainChance)}</p>
+    `;
+  }
+
+  async function refreshWeather() {
+    if (!weatherLocation || weatherBusy) return;
+
+    weatherBusy = true;
+
+    try {
+      const url = new URL("https://api.open-meteo.com/v1/forecast");
+
+      url.searchParams.set("latitude", weatherLocation.lat);
+      url.searchParams.set("longitude", weatherLocation.lon);
+      url.searchParams.set(
+        "current",
+        "temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code"
+      );
+      url.searchParams.set(
+        "daily",
+        "temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+      );
+      url.searchParams.set("timezone", "auto");
+      url.searchParams.set("forecast_days", "1");
+
+      const response = await fetch(url.toString());
+      if (!response.ok) throw new Error("Weather request failed");
+
+      weatherData = await response.json();
+      renderWeather();
+      updateBriefing();
+
+    } catch {
+      const card = document.getElementById("mi-weather-art");
+      if (card) {
+        card.textContent = "Weather could not refresh. Please try again.";
+      }
+    } finally {
+      weatherBusy = false;
+    }
+  }
+
+  function requestLocation() {
+    if (!navigator.geolocation) return;
+
+    navigator.geolocation.getCurrentPosition(
+      position => {
+        weatherLocation = {
+          lat: position.coords.latitude,
+          lon: position.coords.longitude
+        };
+
+        refreshWeather();
+      },
+      () => {
+        const card = document.getElementById("mi-weather-art");
+        if (card) card.textContent =
+          "Location permission was not available. Enable it to load weather.";
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 }
+    );
+  }
+
+  function formatDate(value) {
+    return new Date(value).toLocaleDateString([], {
+      weekday: "short",
+      day: "numeric",
+      month: "short"
+    });
+  }
+
+  function formatTime(value) {
+    return new Date(value).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit"
+    });
+  }
+
+  function updateBriefing() {
+    const output = document.getElementById("mi-briefing-content");
+    if (!output) return;
+
+    const meetings = getMeetings();
+    const next = meetings[0];
+
+    const inboxItems = [
+      ...document.querySelectorAll("#ms-gmail-list .ms-list-item")
+    ];
+
+    const newsItems = [
+      ...document.querySelectorAll("#ms-news .ms-list-item")
+    ];
+
+    const subjects = inboxItems.map(item =>
+      item.querySelector("strong")?.textContent || ""
+    );
+
+    const priorityWords = [
+      "urgent", "important", "action required",
+      "deadline", "meeting today", "reminder"
+    ];
+
+    const priorityEmails = subjects.filter(subject =>
+      priorityWords.some(word =>
+        subject.toLowerCase().includes(word)
+      )
+    );
+
+    const rows = [];
+
+    if (next) {
+      const minutes = Math.round(
+        (new Date(next.startAt).getTime() - Date.now()) / 60000
+      );
+
+      rows.push({
+        icon: "📅",
+        text: `Next meeting: ${next.title} · ${formatDate(next.startAt)} at ${formatTime(next.startAt)}`
+      });
+
+      if (minutes <= 120 && minutes > 0) {
+        rows.push({
+          icon: "⏰",
+          text: "Your next meeting is within two hours. Check your route and departure plan."
+        });
+      }
+    } else {
+      rows.push({
+        icon: "📅",
+        text: "No upcoming meetings are currently recorded in MORNI."
+      });
+    }
+
+    if (inboxItems.length) {
+      rows.push({
+        icon: "✉️",
+        text: `${inboxItems.length} recent inbox messages are loaded.`
+      });
+    } else {
+      rows.push({
+        icon: "✉️",
+        text: "Gmail is not connected or no inbox messages are loaded."
+      });
+    }
+
+    if (priorityEmails.length) {
+      rows.push({
+        icon: "🔔",
+        text: `${priorityEmails.length} subject line(s) contain priority words. Review them in Gmail.`
+      });
+    }
+
+    if (weatherData) {
+      const code = weatherData.current.weather_code;
+      const rain = weatherData.daily?.precipitation_probability_max?.[0] ?? 0;
+
+      rows.push({
+        icon: "🌤️",
+        text: `${weatherDescription(code)[0]}, ${Math.round(weatherData.current.temperature_2m)}°C. ${weatherAdvice(code, rain)}`
+      });
+    } else {
+      rows.push({
+        icon: "🌤️",
+        text: "Weather is not loaded yet. Share your location to include it."
+      });
+    }
+
+    if (newsItems.length) {
+      rows.push({
+        icon: "📰",
+        text: `${newsItems.length} news headlines are available in MORNI.`
+      });
+    } else {
+      rows.push({
+        icon: "📰",
+        text: "No news headlines are loaded yet. Choose a region in Daily News."
+      });
+    }
+
+    output.replaceChildren();
+
+    rows.forEach(row => {
+      const item = document.createElement("div");
+      item.className = "mi-row";
+
+      const dot = document.createElement("span");
+      dot.className = "mi-dot";
+
+      const text = document.createElement("span");
+      text.textContent = row.icon + "  " + row.text;
+
+      item.append(dot, text);
+      output.appendChild(item);
+    });
+
+    const greeting = document.getElementById("mi-greeting");
+    if (greeting) {
+      const hour = new Date().getHours();
+      greeting.textContent =
+        hour < 12 ? "Good morning." :
+        hour < 17 ? "Good afternoon." : "Good evening.";
+    }
+  }
+
+  function renderCommute() {
+    const output = document.getElementById("mi-commute-content");
+    if (!output) return;
+
+    const next = getMeetings()[0];
+
+    output.replaceChildren();
+
+    if (!next) {
+      output.textContent =
+        "Add a meeting with a destination to start planning your commute.";
+      return;
+    }
+
+    const title = document.createElement("strong");
+    title.textContent = next.title;
+
+    const details = document.createElement("p");
+    details.className = "mi-muted";
+    details.textContent =
+      `${formatDate(next.startAt)} · ${formatTime(next.startAt)} · ${next.venue || "Destination missing"}`;
+
+    const travel = document.createElement("input");
+    travel.className = "mi-input";
+    travel.type = "number";
+    travel.min = "0";
+    travel.max = "600";
+    travel.id = "mi-travel-time";
+    travel.value = String(next.travelMinutes ?? 30);
+    travel.placeholder = "Estimated travel time in minutes";
+
+    const buffer = document.createElement("input");
+    buffer.className = "mi-input";
+    buffer.type = "number";
+    buffer.min = "0";
+    buffer.max = "180";
+    buffer.id = "mi-buffer-time";
+    buffer.value = String(next.bufferMinutes ?? 15);
+    buffer.placeholder = "Extra buffer in minutes";
+
+    const result = document.createElement("div");
+    result.className = "mi-result";
+    result.id = "mi-commute-result";
+    result.textContent =
+      "Enter your estimated travel time and buffer to calculate when to leave.";
+
+    const actions = document.createElement("div");
+    actions.className = "mi-actions";
+
+    const calculate = document.createElement("button");
+    calculate.className = "mi-button orange";
+    calculate.textContent = "Calculate departure";
+    calculate.dataset.miAction = "calculate";
+
+    const directions = document.createElement("button");
+    directions.className = "mi-button";
+    directions.textContent = "Open directions";
+    directions.dataset.miAction = "directions";
+
+    actions.append(calculate, directions);
+    output.append(title, details);
+
+    if (!next.venue) {
+      const warning = document.createElement("p");
+      warning.className = "mi-muted";
+      warning.textContent =
+        "Add a destination to this meeting before requesting directions.";
+      output.appendChild(warning);
+    }
+
+    output.append(travel, buffer, actions, result);
+    output.dataset.meetingId = next.id;
+  }
+
+  function calculateDeparture() {
+    const next = getMeetings()[0];
+    if (!next) return;
+
+    const travel = Math.max(0, Math.min(600,
+      Number(document.getElementById("mi-travel-time")?.value || 0)
+    ));
+
+    const buffer = Math.max(0, Math.min(180,
+      Number(document.getElementById("mi-buffer-time")?.value || 0)
+    ));
+
+    const departure = new Date(
+      new Date(next.startAt).getTime() -
+      (travel + buffer) * 60000
+    );
+
+    const result = document.getElementById("mi-commute-result");
+    if (!result) return;
+
+    if (departure.getTime() < Date.now()) {
+      result.textContent =
+        "Your calculated departure time has already passed. Check the meeting time and estimates.";
+    } else {
+      result.textContent =
+        `Suggested departure: ${formatDate(departure)} at ${formatTime(departure)}. This includes ${travel} minutes of travel and ${buffer} minutes of buffer. Travel time is your estimate, not live traffic.`;
+    }
+  }
+
+  function openDirections() {
+    const next = getMeetings()[0];
+
+    if (!next?.venue) {
+      alert("Add a meeting destination first.");
+      return;
+    }
+
+    const url = new URL("https://www.google.com/maps/dir/");
+    url.searchParams.set("api", "1");
+    url.searchParams.set("destination", next.venue);
+    url.searchParams.set("travelmode", "driving");
+
+    if (weatherLocation) {
+      url.searchParams.set(
+        "origin",
+        `${weatherLocation.lat},${weatherLocation.lon}`
+      );
+    }
+
+    window.open(url.toString(), "_blank", "noopener,noreferrer");
+  }
+
+  function ensureDashboard() {
+    const page = document.querySelector("#morni-services-panel .ms-page");
+    if (!page) return;
+
+    addStyles();
+
+    const hero = page.querySelector(".ms-hero");
+    if (!hero) return;
+
+    if (!document.getElementById("mi-briefing")) {
+      const briefing = document.createElement("section");
+      briefing.id = "mi-briefing";
+      briefing.className = "mi-card";
+
+      briefing.innerHTML = `
+        <div class="mi-kicker">YOUR PERSONAL MORNING INTELLIGENCE</div>
+        <h2 id="mi-greeting">Good morning.</h2>
+        <p class="mi-muted">
+          MORNI brings together the information currently available to it.
+        </p>
+        <div id="mi-briefing-content"></div>
+        <p class="mi-muted">
+          Briefing updates as connected information becomes available.
+        </p>
+      `;
+
+      hero.insertAdjacentElement("afterend", briefing);
+    }
+
+    if (!document.getElementById("mi-commute")) {
+      const commute = document.createElement("section");
+      commute.id = "mi-commute";
+      commute.className = "mi-card";
+
+      commute.innerHTML = `
+        <div class="mi-kicker">PLAN AHEAD</div>
+        <h2>Smart Commute Assistant</h2>
+        <p class="mi-muted">
+          Plan when to leave for your next recorded meeting.
+        </p>
+        <div id="mi-commute-content"></div>
+      `;
+
+      const briefing = document.getElementById("mi-briefing");
+      briefing.insertAdjacentElement("afterend", commute);
+    }
+
+    const weatherCard = [...page.querySelectorAll(".ms-card")]
+      .find(card => card.querySelector("#ms-weather"));
+
+    if (weatherCard && !document.getElementById("mi-weather-art")) {
+      const art = document.createElement("div");
+      art.id = "mi-weather-art";
+      weatherCard.querySelector("#ms-weather")
+        .insertAdjacentElement("beforebegin", art);
+
+      renderWeather();
+    }
+
+    updateBriefing();
+    renderCommute();
+  }
+
+  document.addEventListener("click", event => {
+    const action = event.target.closest("[data-mi-action]")?.dataset.miAction;
+    if (!action) return;
+
+    if (action === "calculate") calculateDeparture();
+    if (action === "directions") openDirections();
+  });
+
+  document.addEventListener("click", event => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+
+    if (action === "locate") {
+      setTimeout(requestLocation, 1000);
+    }
+
+    if (action === "weather") {
+      setTimeout(refreshWeather, 1000);
+    }
+
+    if (action === "departure" || action === "remove") {
+      setTimeout(() => {
+        renderCommute();
+        updateBriefing();
+      }, 100);
+    }
+  });
+
+  // Keep the briefing current while Connected Services is open.
+  setInterval(() => {
+    ensureDashboard();
+    updateBriefing();
+    renderCommute();
+  }, 5000);
+
+  console.info("MORNI Morning Intelligence loaded.");
+})();
+
