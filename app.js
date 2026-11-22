@@ -10321,3 +10321,204 @@ window.MORNI_V4 = {
   window.MORNI_V4_RECOVERY = { mount, update, loadWeather };
   start();
 })();
+
+
+/* =====================================================
+   MORNI — DASHBOARD RECOVERY PATCH
+   Independent mount system. Preserves existing features.
+   ===================================================== */
+(() => {
+  "use strict";
+
+  if (window.MORNI_DASHBOARD_RECOVERY) return;
+
+  const DASHBOARD_ID = "morni-recovery-dashboard";
+  let observer = null;
+
+  function getPage() {
+    return document.querySelector(
+      "#pageContent .ms-page"
+    );
+  }
+
+  function getMeetings() {
+    try {
+      const result = window.MORNI_V4_BRIDGE?.getMeetings?.();
+      return Array.isArray(result) ? result : [];
+    } catch (error) {
+      console.warn("MORNI meetings unavailable:", error);
+      return [];
+    }
+  }
+
+  function makeDashboard() {
+    const dashboard = document.createElement("section");
+    dashboard.id = DASHBOARD_ID;
+
+    dashboard.style.cssText = `
+      margin:24px 0;
+      padding:22px;
+      border-radius:20px;
+      background:linear-gradient(135deg,#123d2c,#1d6545);
+      color:white;
+      font-family:inherit;
+      box-shadow:0 10px 30px rgba(0,0,0,.15);
+    `;
+
+    dashboard.innerHTML = `
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap">
+        <div>
+          <div style="font-size:12px;letter-spacing:2px;opacity:.8">MORNI INTELLIGENCE</div>
+          <h2 style="margin:6px 0;font-size:25px">Your day, made smarter.</h2>
+          <div style="opacity:.8;font-size:13px">Your connected morning overview</div>
+        </div>
+        <button id="morni-recovery-refresh" style="border:0;border-radius:12px;padding:11px 16px;background:#f4a340;color:#182d20;font-weight:700;cursor:pointer">
+          Refresh
+        </button>
+      </div>
+      <div id="morni-recovery-content" style="margin-top:20px">
+        Loading your day...
+      </div>
+    `;
+
+    dashboard.querySelector("#morni-recovery-refresh")
+      .addEventListener("click", updateDashboard);
+
+    return dashboard;
+  }
+
+  function updateDashboard() {
+    const content = document.getElementById("morni-recovery-content");
+    if (!content) return;
+
+    const meetings = getMeetings()
+      .filter(item => item && item.startAt)
+      .map(item => ({ ...item, date: new Date(item.startAt) }))
+      .filter(item => !Number.isNaN(item.date.getTime()) && item.date >= new Date())
+      .sort((a, b) => a.date - b.date);
+
+    const next = meetings[0];
+
+    const meetingHTML = next
+      ? `<div style="font-size:12px;opacity:.75">NEXT MEETING</div>
+         <div style="font-size:20px;font-weight:700;margin:5px 0">${escapeHTML(next.title || "Upcoming meeting")}</div>
+         <div>${escapeHTML(next.date.toLocaleString())}</div>
+         <div style="opacity:.8;margin-top:4px">${escapeHTML(next.venue || "Location not specified")}</div>
+         <button id="morni-recovery-route" style="margin-top:12px;border:0;border-radius:10px;padding:10px 14px;background:#f4a340;color:#182d20;font-weight:700;cursor:pointer">Open directions</button>`
+      : `<div style="font-size:18px;font-weight:700">No upcoming meetings found</div>
+         <div style="opacity:.8;margin-top:5px">Your schedule is clear for now.</div>`;
+
+    content.innerHTML = `
+      <div style="padding:17px;border-radius:15px;background:rgba(255,255,255,.1)">
+        ${meetingHTML}
+      </div>
+      <div style="margin-top:12px;font-size:12px;opacity:.7">
+        ${meetings.length} upcoming meeting(s) detected
+      </div>
+    `;
+
+    const routeButton = content.querySelector("#morni-recovery-route");
+    if (routeButton && next?.venue) {
+      routeButton.addEventListener("click", () => {
+        const destination = encodeURIComponent(next.venue);
+        window.open(
+          "https://www.google.com/maps/dir/?api=1&destination=" + destination,
+          "_blank",
+          "noopener"
+        );
+      });
+    }
+  }
+
+  function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, char => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    })[char]);
+  }
+
+  function mount() {
+    const page = getPage();
+    if (!page || page.querySelector("#" + DASHBOARD_ID)) return;
+
+    const hero = page.querySelector(".ms-hero");
+    const dashboard = makeDashboard();
+
+    if (hero) {
+      hero.insertAdjacentElement("afterend", dashboard);
+    } else {
+      page.prepend(dashboard);
+    }
+
+    updateDashboard();
+  }
+
+  function start() {
+    mount();
+
+    const target = document.getElementById("pageContent") || document.body;
+
+    if (!observer) {
+      observer = new MutationObserver(() => mount());
+      observer.observe(target, { childList: true, subtree: true });
+    }
+  }
+
+  window.MORNI_DASHBOARD_RECOVERY = {
+    mount,
+    refresh: updateDashboard,
+    getMeetings
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start, { once: true });
+  } else {
+    start();
+  }
+   
+  function updateGmailVisibility() {
+    const page = getPage();
+    if (!page) return;
+
+    const gmailList = page.querySelector("#ms-gmail-list");
+    if (!gmailList) return;
+
+    const gmailCard =
+      gmailList.closest(".ms-card") ||
+      gmailList.closest(".ms-section") ||
+      gmailList.parentElement;
+
+    if (!gmailCard) return;
+
+    const hasInboxContent =
+      gmailList.children.length > 0 &&
+      gmailList.textContent.trim().length > 0;
+
+    const connected = hasInboxContent &&
+      !/connect gmail|not connected|sign in to gmail/i.test(
+        gmailList.textContent
+      );
+
+    gmailCard.style.display = connected ? "" : "none";
+  }
+
+  const gmailObserver = new MutationObserver(updateGmailVisibility);
+
+  function watchGmail() {
+    const page = getPage();
+    const gmailList = page?.querySelector("#ms-gmail-list");
+
+    if (gmailList) {
+      gmailObserver.observe(gmailList, {
+        childList: true,
+        subtree: true,
+        characterData: true
+      });
+      updateGmailVisibility();
+    }
+  }
+
+})();
