@@ -8361,3 +8361,897 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
   console.log("MORNI Morning Intelligence V3 loaded.");
 })();
+
+
+/* ============================================================
+   MORNI V4 — CONNECTED INTELLIGENCE EXPANSION
+   ------------------------------------------------------------
+   Additive extension. Does not replace original MORNI code.
+   Integrates through the existing Connected Services DOM.
+   
+   Features:
+   - Unified Smart Morning Briefing
+   - Gmail priority overview
+   - Existing meeting awareness
+   - Meeting-specific route and departure shortcuts
+   - Smart manual commute calculator
+   - Weather and news summaries
+   - One-click refresh of existing services
+   - Safe, lightweight updates
+   - No MutationObserver or repeated form rebuilding
+   ============================================================ */
+
+(() => {
+  "use strict";
+
+  if (window.__MORNI_V4_INSTALLED__) return;
+  window.__MORNI_V4_INSTALLED__ = true;
+
+  const ID = "morni-v4-intelligence";
+  const STYLE_ID = "morni-v4-styles";
+
+  let lastSummary = "";
+  let lastMeetingsSignature = "";
+  let meetingsCache = [];
+
+  const $ = (selector, root = document) =>
+    root.querySelector(selector);
+
+  const $$ = (selector, root = document) =>
+    Array.from(root.querySelectorAll(selector));
+
+  const clean = value =>
+    String(value || "").replace(/\s+/g, " ").trim();
+
+  function getPage() {
+    const panel = $("#morni-services-panel");
+
+    if (panel) {
+      const page = $(".ms-page", panel);
+      if (page) return page;
+    }
+
+    return $$(".ms-page").find(page =>
+      $("#ms-gmail-list", page) &&
+      $("#ms-meetings", page)
+    ) || null;
+  }
+
+  function isVisible(element) {
+    if (!element) return false;
+
+    const style = getComputedStyle(element);
+
+    return (
+      style.display !== "none" &&
+      style.visibility !== "hidden" &&
+      element.getClientRects().length > 0
+    );
+  }
+
+  /* ----------------------------------------------------------
+     1. DESIGN
+     ---------------------------------------------------------- */
+
+  function installStyles() {
+    if ($("#" + STYLE_ID)) return;
+
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+
+    style.textContent = `
+      #${ID} {
+        margin: 24px 0;
+        color: var(--text, #edf2eb);
+        font-family: inherit;
+      }
+
+      #${ID} * {
+        box-sizing: border-box;
+      }
+
+      #${ID} .v4-heading {
+        margin: 0 0 6px;
+        font-size: 23px;
+        font-weight: 850;
+        letter-spacing: -.6px;
+      }
+
+      #${ID} .v4-description {
+        color: var(--muted, #a5b0a4);
+        font-size: 13px;
+        line-height: 1.6;
+        margin: 0 0 17px;
+      }
+
+      #${ID} .v4-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 15px;
+      }
+
+      #${ID} .v4-card {
+        min-width: 0;
+        padding: 18px;
+        border: 1px solid rgba(130,165,125,.20);
+        border-radius: 17px;
+        background: linear-gradient(
+          145deg,
+          rgba(45,72,46,.28),
+          rgba(22,31,25,.76)
+        );
+        box-shadow: 0 8px 24px rgba(0,0,0,.09);
+      }
+
+      #${ID} .v4-wide {
+        grid-column: 1 / -1;
+      }
+
+      #${ID} .v4-title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 12px;
+        font-size: 15px;
+        font-weight: 800;
+      }
+
+      #${ID} .v4-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 35px;
+        height: 35px;
+        flex-shrink: 0;
+        border-radius: 11px;
+        background: rgba(119,177,91,.15);
+        font-size: 18px;
+      }
+
+      #${ID} .v4-content {
+        font-size: 13px;
+        line-height: 1.75;
+        color: var(--text, #edf2eb);
+        overflow-wrap: anywhere;
+      }
+
+      #${ID} .v4-muted {
+        color: var(--muted, #a5b0a4);
+        font-size: 12px;
+        line-height: 1.6;
+      }
+
+      #${ID} .v4-item {
+        padding: 10px 0;
+        border-bottom: 1px solid rgba(150,170,150,.12);
+      }
+
+      #${ID} .v4-item:last-child {
+        border-bottom: 0;
+      }
+
+      #${ID} .v4-field {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        margin: 7px 0 12px;
+        padding: 11px 12px;
+        border: 1px solid rgba(150,170,150,.25);
+        border-radius: 10px;
+        background: rgba(0,0,0,.18);
+        color: var(--text, #fff);
+        font: inherit;
+        font-size: 13px;
+      }
+
+      #${ID} .v4-field:focus {
+        outline: 2px solid rgba(130,190,105,.55);
+        outline-offset: 1px;
+      }
+
+      #${ID} .v4-label {
+        display: block;
+        margin-top: 8px;
+        color: var(--muted, #aab5a8);
+        font-size: 11px;
+        font-weight: 750;
+      }
+
+      #${ID} .v4-button {
+        min-height: 38px;
+        padding: 9px 13px;
+        border: 0;
+        border-radius: 10px;
+        background: linear-gradient(135deg,#79b957,#4c8b45);
+        color: white;
+        font-size: 12px;
+        font-weight: 800;
+        cursor: pointer;
+      }
+
+      #${ID} .v4-button:hover {
+        filter: brightness(1.1);
+      }
+
+      #${ID} .v4-secondary {
+        background: rgba(255,255,255,.09);
+        border: 1px solid rgba(255,255,255,.12);
+      }
+
+      #${ID} .v4-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px;
+        margin-top: 13px;
+      }
+
+      #${ID} .v4-result {
+        margin-top: 13px;
+        padding: 12px;
+        border-radius: 11px;
+        border: 1px solid rgba(119,177,91,.19);
+        background: rgba(119,177,91,.09);
+        font-size: 12px;
+        line-height: 1.7;
+        white-space: pre-line;
+        overflow-wrap: anywhere;
+      }
+
+      #${ID} .v4-status {
+        display: inline-block;
+        padding: 5px 9px;
+        border-radius: 8px;
+        background: rgba(119,177,91,.12);
+        color: var(--text, #edf2eb);
+        font-size: 11px;
+      }
+
+      @media(max-width:650px) {
+        #${ID} .v4-grid {
+          grid-template-columns: 1fr;
+        }
+
+        #${ID} .v4-wide {
+          grid-column: auto;
+        }
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  /* ----------------------------------------------------------
+     2. CREATE THE V4 INTERFACE
+     ---------------------------------------------------------- */
+
+  function mount() {
+    const page = getPage();
+
+    if (!page) return false;
+
+    if ($("#" + ID, page)) return true;
+
+    installStyles();
+
+    const section = document.createElement("section");
+    section.id = ID;
+
+    section.innerHTML = `
+      <h2 class="v4-heading">✦ MORNI Intelligence</h2>
+      <p class="v4-description">
+        Your connected day, understood in one place.
+        Your inbox, meetings, weather and news work together.
+      </p>
+
+      <div class="v4-grid">
+
+        <article class="v4-card v4-wide">
+          <h3 class="v4-title">
+            <span class="v4-icon">🧠</span>
+            Smart Morning Briefing
+          </h3>
+
+          <div class="v4-content" id="v4-briefing">
+            Preparing your briefing...
+          </div>
+
+          <div class="v4-actions">
+            <button class="v4-button" data-v4="refresh">
+              ↻ Refresh connected information
+            </button>
+            <button class="v4-button v4-secondary" data-v4="briefing">
+              Update briefing
+            </button>
+          </div>
+
+          <p class="v4-muted" id="v4-updated">
+            Briefing uses information currently displayed in MORNI.
+          </p>
+        </article>
+
+        <article class="v4-card">
+          <h3 class="v4-title">
+            <span class="v4-icon">📅</span>
+            Meeting Intelligence
+          </h3>
+
+          <div id="v4-meetings" class="v4-content">
+            Looking for your meetings...
+          </div>
+
+          <label class="v4-label" for="v4-meeting-select">
+            Select a detected meeting
+          </label>
+
+          <select class="v4-field" id="v4-meeting-select">
+            <option value="">No meeting selected</option>
+          </select>
+
+          <div class="v4-actions">
+            <button class="v4-button" data-v4="meeting-route">
+              🗺️ Open meeting route
+            </button>
+            <button class="v4-button v4-secondary" data-v4="meeting-departure">
+              ⏱️ Existing departure planner
+            </button>
+          </div>
+        </article>
+
+        <article class="v4-card">
+          <h3 class="v4-title">
+            <span class="v4-icon">🚗</span>
+            Smart Commute Planner
+          </h3>
+
+          <p class="v4-muted">
+            Plan a journey using your meeting time, estimated travel
+            duration and an extra buffer.
+          </p>
+
+          <label class="v4-label" for="v4-destination">
+            Destination
+          </label>
+          <input class="v4-field" id="v4-destination"
+            maxlength="180" placeholder="Enter a destination">
+
+          <label class="v4-label" for="v4-time">
+            Meeting date and time
+          </label>
+          <input class="v4-field" id="v4-time" type="datetime-local">
+
+          <label class="v4-label" for="v4-travel">
+            Estimated journey (minutes)
+          </label>
+          <input class="v4-field" id="v4-travel"
+            type="number" min="0" max="600" value="30">
+
+          <label class="v4-label" for="v4-buffer">
+            Extra buffer (minutes)
+          </label>
+          <input class="v4-field" id="v4-buffer"
+            type="number" min="0" max="180" value="15">
+
+          <div class="v4-actions">
+            <button class="v4-button" data-v4="calculate">
+              Calculate departure
+            </button>
+            <button class="v4-button v4-secondary" data-v4="directions">
+              Open Google Maps
+            </button>
+          </div>
+
+          <div class="v4-result" id="v4-commute-result">
+            Your departure recommendation will appear here.
+          </div>
+        </article>
+
+        <article class="v4-card">
+          <h3 class="v4-title">
+            <span class="v4-icon">🌤️</span>
+            Weather Intelligence
+          </h3>
+
+          <div id="v4-weather" class="v4-content">
+            Waiting for weather information...
+          </div>
+
+          <p class="v4-muted">
+            Uses your existing MORNI weather card.
+          </p>
+        </article>
+
+        <article class="v4-card">
+          <h3 class="v4-title">
+            <span class="v4-icon">📰</span>
+            News Intelligence
+          </h3>
+
+          <div id="v4-news" class="v4-content">
+            Waiting for news headlines...
+          </div>
+
+          <p class="v4-muted">
+            A shorter view of the headlines already loaded in MORNI.
+          </p>
+        </article>
+
+      </div>
+    `;
+
+    const previous = $("#" + "morni-intelligence-v3", page);
+    const hero = $(".ms-hero", page);
+    const grid = $(".ms-grid", page);
+
+    if (previous) {
+      previous.insertAdjacentElement("afterend", section);
+    } else if (grid) {
+      grid.insertAdjacentElement("afterend", section);
+    } else if (hero) {
+      hero.insertAdjacentElement("afterend", section);
+    } else {
+      page.appendChild(section);
+    }
+
+    refreshAllDisplays();
+
+    return true;
+  }
+
+  /* ----------------------------------------------------------
+     3. READ EXISTING CONNECTED SERVICES
+     ---------------------------------------------------------- */
+
+  function getEmailItems() {
+    const list = $("#ms-gmail-list");
+    if (!list) return [];
+
+    return $$(".ms-list-item", list)
+      .map(item => clean(item.innerText || item.textContent))
+      .filter(Boolean);
+  }
+
+  function getMeetingCards() {
+    const area = $("#ms-meetings");
+    if (!area) return [];
+
+    return $$("[data-meeting]", area).filter(card =>
+      clean(card.innerText || card.textContent)
+    );
+  }
+
+  function getMeetingTitle(card) {
+    const heading = $("h1,h2,h3,h4,strong", card);
+
+    if (heading) return clean(heading.textContent);
+
+    return clean(card.innerText || card.textContent)
+      .split("\n")
+      .filter(Boolean)[0] || "Scheduled meeting";
+  }
+
+  function getMeetingSummary(card) {
+    return clean(card.innerText || card.textContent)
+      .slice(0, 220);
+  }
+
+  function getNewsLines() {
+    const area = $("#ms-news");
+    if (!area) return [];
+
+    return clean(area.innerText || area.textContent)
+      .split(/(?<=[.!?])\s+|\n+/)
+      .map(clean)
+      .filter(line =>
+        line.length > 20 &&
+        !/^(refresh|read more|load more|discover news)$/i.test(line)
+      );
+  }
+
+  function getWeatherText() {
+    return clean($("#ms-weather")?.innerText || "");
+  }
+
+  /* ----------------------------------------------------------
+     4. BRIEFING GENERATION
+     ---------------------------------------------------------- */
+
+  function buildBriefing() {
+    const emails = getEmailItems();
+    const meetings = getMeetingCards();
+    const weather = getWeatherText();
+    const news = getNewsLines();
+
+    const priorityPattern =
+      /\b(urgent|important|deadline|exam|meeting|tomorrow|today|reminder|action required|invitation)\b/i;
+
+    const priorities = emails.filter(email =>
+      priorityPattern.test(email)
+    );
+
+    const lines = [];
+
+    lines.push(
+      emails.length
+        ? `📧 Your inbox currently displays ${emails.length} message(s).`
+        : "📧 No inbox messages are currently displayed. Check your Gmail connection."
+    );
+
+    if (priorities.length) {
+      lines.push(
+        `⭐ ${priorities.length} displayed email(s) contain priority-related keywords. Review these messages in Gmail.`
+      );
+
+      priorities.slice(0, 3).forEach(email => {
+        lines.push("• " + email.slice(0, 150));
+      });
+    } else if (emails.length) {
+      lines.push("✅ No obvious priority keywords were found in the displayed messages.");
+    }
+
+    lines.push(
+      meetings.length
+        ? `📅 MORNI currently displays ${meetings.length} meeting(s) in Meeting Assistant.`
+        : "📅 No detected meetings are currently displayed. Check your Meeting Assistant."
+    );
+
+    meetings.slice(0, 2).forEach(card => {
+      lines.push("• " + getMeetingSummary(card));
+    });
+
+    lines.push(
+      weather
+        ? "🌤️ Weather: " + weather.slice(0, 240)
+        : "🌤️ Weather has not loaded yet. Use the existing weather card."
+    );
+
+    if (news.length) {
+      lines.push("📰 News to know:");
+
+      news.slice(0, 3).forEach(headline => {
+        lines.push("• " + headline.slice(0, 170));
+      });
+    } else {
+      lines.push("📰 News has not loaded yet. Use Discover News in the existing card.");
+    }
+
+    lines.push(
+      "💡 MORNI recommendation: Review priority emails, confirm your next meeting and check your route before travelling."
+    );
+
+    return lines.join("\n\n");
+  }
+
+  function updateBriefing() {
+    const output = $("#v4-briefing");
+    if (!output) return;
+
+    const result = buildBriefing();
+
+    if (result !== lastSummary) {
+      output.textContent = result;
+      output.style.whiteSpace = "pre-line";
+      lastSummary = result;
+    }
+
+    const updated = $("#v4-updated");
+    if (updated) {
+      updated.textContent =
+        "Last updated: " +
+        new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit"
+        });
+    }
+  }
+
+  /* ----------------------------------------------------------
+     5. MEETING INTELLIGENCE
+     ---------------------------------------------------------- */
+
+  function updateMeetings() {
+    const cards = getMeetingCards();
+    const signature = cards.map(card =>
+      card.dataset.meeting + ":" + getMeetingSummary(card)
+    ).join("|");
+
+    const output = $("#v4-meetings");
+    const select = $("#v4-meeting-select");
+
+    if (!output || !select) return;
+
+    if (signature === lastMeetingsSignature) return;
+
+    lastMeetingsSignature = signature;
+    meetingsCache = cards;
+
+    if (!cards.length) {
+      output.textContent =
+        "No meeting cards are currently displayed. Connect Gmail or add a meeting using your existing Meeting Assistant.";
+    } else {
+      output.textContent =
+        cards.length + " meeting(s) currently available in MORNI.";
+    }
+
+    const oldValue = select.value;
+
+    select.replaceChildren();
+
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "Choose a meeting";
+    select.appendChild(empty);
+
+    cards.forEach((card, index) => {
+      const option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = getMeetingTitle(card);
+      select.appendChild(option);
+    });
+
+    if (oldValue !== "" && Number(oldValue) < cards.length) {
+      select.value = oldValue;
+    }
+  }
+
+  function selectedMeeting() {
+    const select = $("#v4-meeting-select");
+
+    if (!select || select.value === "") return null;
+
+    return meetingsCache[Number(select.value)] || null;
+  }
+
+  function useExistingMeetingAction(action) {
+    const card = selectedMeeting();
+    const result = $("#v4-commute-result");
+
+    if (!card) {
+      if (result) result.textContent = "Select a detected meeting first.";
+      return;
+    }
+
+    const button = $(`[data-action="${action}"]`, card);
+
+    if (!button) {
+      if (result) {
+        result.textContent =
+          "The selected meeting does not currently provide this action.";
+      }
+      return;
+    }
+
+    button.click();
+  }
+
+  /* ----------------------------------------------------------
+     6. WEATHER AND NEWS SUMMARIES
+     ---------------------------------------------------------- */
+
+  function updateWeather() {
+    const output = $("#v4-weather");
+    if (!output) return;
+
+    const weather = getWeatherText();
+
+    output.textContent = weather
+      ? weather.slice(0, 450)
+      : "Weather is not available yet. Use Find My Location or Refresh Weather in the original MORNI card.";
+  }
+
+  function updateNews() {
+    const output = $("#v4-news");
+    if (!output) return;
+
+    const headlines = getNewsLines();
+
+    if (!headlines.length) {
+      output.textContent =
+        "No headlines are currently displayed. Choose your region and use Discover News in the original MORNI card.";
+      return;
+    }
+
+    output.replaceChildren();
+
+    headlines.slice(0, 4).forEach(headline => {
+      const item = document.createElement("div");
+      item.className = "v4-item";
+      item.textContent = headline.slice(0, 200);
+      output.appendChild(item);
+    });
+  }
+
+  function refreshAllDisplays() {
+    updateBriefing();
+    updateMeetings();
+    updateWeather();
+    updateNews();
+  }
+
+  /* ----------------------------------------------------------
+     7. REFRESH EXISTING SERVICES
+     Uses the original buttons, preserving their event handlers.
+     ---------------------------------------------------------- */
+
+  function refreshConnectedServices() {
+    const page = getPage();
+    if (!page) return;
+
+    const actions = ["refresh", "weather", "news"];
+
+    actions.forEach(action => {
+      const button = $(`[data-action="${action}"]`, page);
+
+      if (button && !button.disabled) {
+        button.click();
+      }
+    });
+
+    setTimeout(refreshAllDisplays, 1200);
+    setTimeout(refreshAllDisplays, 3500);
+  }
+
+  /* ----------------------------------------------------------
+     8. SMART COMMUTE
+     ---------------------------------------------------------- */
+
+  function commuteValues() {
+    const destination = clean($("#v4-destination")?.value);
+    const time = $("#v4-time")?.value;
+    const travel = Number($("#v4-travel")?.value);
+    const buffer = Number($("#v4-buffer")?.value);
+
+    if (!destination) return { error: "Enter a destination." };
+    if (!time) return { error: "Enter the meeting date and time." };
+
+    if (!Number.isFinite(travel) || travel < 0 || travel > 600) {
+      return { error: "Travel time must be between 0 and 600 minutes." };
+    }
+
+    if (!Number.isFinite(buffer) || buffer < 0 || buffer > 180) {
+      return { error: "Buffer must be between 0 and 180 minutes." };
+    }
+
+    const meeting = new Date(time);
+
+    if (Number.isNaN(meeting.getTime())) {
+      return { error: "Please enter a valid meeting date and time." };
+    }
+
+    return { destination, meeting, travel, buffer };
+  }
+
+  function calculateDeparture() {
+    const output = $("#v4-commute-result");
+    if (!output) return;
+
+    const values = commuteValues();
+
+    if (values.error) {
+      output.textContent = values.error;
+      return;
+    }
+
+    if (values.meeting <= new Date()) {
+      output.textContent = "That meeting time is in the past. Please update it.";
+      return;
+    }
+
+    const departure = new Date(
+      values.meeting.getTime() -
+      (values.travel + values.buffer) * 60000
+    );
+
+    const format = date => date.toLocaleString([], {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      hour: "numeric",
+      minute: "2-digit"
+    });
+
+    output.textContent =
+      "🚗 Suggested departure: " + format(departure) +
+      "\n\nMeeting: " + format(values.meeting) +
+      "\nEstimated journey: " + values.travel + " minutes" +
+      "\nExtra buffer: " + values.buffer + " minutes" +
+      "\n\nThis calculation uses your estimated journey duration. Check Google Maps for live traffic and updated travel times.";
+  }
+
+  function openDirections() {
+    const values = commuteValues();
+    const output = $("#v4-commute-result");
+
+    if (values.error) {
+      if (output) output.textContent = values.error;
+      return;
+    }
+
+    const url =
+      "https://www.google.com/maps/dir/?api=1" +
+      "&destination=" + encodeURIComponent(values.destination) +
+      "&travelmode=driving";
+
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  /* ----------------------------------------------------------
+     9. V4 BUTTON HANDLING
+     ---------------------------------------------------------- */
+
+  document.addEventListener("click", event => {
+    const button = event.target.closest("[data-v4]");
+    if (!button || !button.closest("#" + ID)) return;
+
+    const action = button.dataset.v4;
+
+    if (action === "briefing") {
+      refreshAllDisplays();
+    }
+
+    if (action === "refresh") {
+      refreshConnectedServices();
+    }
+
+    if (action === "meeting-route") {
+      useExistingMeetingAction("route");
+    }
+
+    if (action === "meeting-departure") {
+      useExistingMeetingAction("departure");
+    }
+
+    if (action === "calculate") {
+      calculateDeparture();
+    }
+
+    if (action === "directions") {
+      openDirections();
+    }
+  });
+
+  /* ----------------------------------------------------------
+     10. SAFE STARTUP AND PAGE RECOVERY
+     No MutationObserver.
+     No repeated input rebuilding.
+     ---------------------------------------------------------- */
+
+  function start() {
+    mount();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start, { once: true });
+  } else {
+    start();
+  }
+
+  document.addEventListener("click", event => {
+    if (event.target.closest("#morni-services-button")) {
+      setTimeout(mount, 200);
+      setTimeout(mount, 600);
+    }
+  }, true);
+
+  // Only checks for the panel when it is actually visible.
+  // Existing form values are never rebuilt by this timer.
+  setInterval(() => {
+    const panel = $("#morni-services-panel");
+
+    if (!panel || !isVisible(panel)) return;
+
+    mount();
+    refreshAllDisplays();
+  }, 12000);
+
+  window.MORNI_V4 = {
+    version: "4.0",
+    refresh: refreshAllDisplays,
+    refreshConnectedServices,
+    updateBriefing,
+    updateMeetings,
+    calculateDeparture,
+    openDirections
+  };
+
+  console.log("MORNI V4 Connected Intelligence loaded.");
+})();
