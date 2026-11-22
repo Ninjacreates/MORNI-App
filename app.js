@@ -6920,6 +6920,38 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
   /* ---------------- BUTTON ACTIONS ---------------- */
 
+   /* =====================================================
+   MORNI V4 — INTELLIGENCE INTEGRATION BRIDGE
+   Connects the new upgrade to the original Services data.
+   ===================================================== */
+
+window.MORNI_V4_BRIDGE = {
+  getMeetings: () => {
+    try {
+      return readEvents();
+    } catch (error) {
+      console.error("MORNI V4: Could not read meetings", error);
+      return [];
+    }
+  },
+
+  getNextMeeting: () => {
+    try {
+      return getNextMeeting();
+    } catch (error) {
+      console.error("MORNI V4: Could not find next meeting", error);
+      return null;
+    }
+  },
+
+  refreshInbox: () => {
+    try {
+      return loadInbox(false);
+    } catch (error) {
+      console.error("MORNI V4: Could not refresh Gmail", error);
+    }
+  }
+};
   root.addEventListener("click", event => {
     const button = event.target.closest("[data-action]");
     if (!button) return;
@@ -9254,4 +9286,757 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
   };
 
   console.log("MORNI V4 Connected Intelligence loaded.");
+})();
+
+/* ============================================================
+   MORNI V4 — CONNECTED MORNING INTELLIGENCE
+   Append at the absolute bottom of app.js.
+   Preserves the original Services and Meeting Assistant.
+   ============================================================ */
+
+(() => {
+  "use strict";
+
+  if (window.__MORNI_V4_INSTALLED__) return;
+  window.__MORNI_V4_INSTALLED__ = true;
+
+  const BRIDGE = window.MORNI_V4_BRIDGE;
+  const PANEL_ID = "morni-v4-dashboard";
+  const STYLE_ID = "morni-v4-styles";
+
+  let currentLocation = null;
+  let currentWeather = null;
+  let weatherBusy = false;
+
+  const $ = (selector, root = document) =>
+    root.querySelector(selector);
+
+  const escapeHTML = value =>
+    String(value ?? "").replace(/[&<>"']/g, char => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    })[char]);
+
+  function getMeetings() {
+    try {
+      const meetings = BRIDGE?.getMeetings?.();
+      return Array.isArray(meetings) ? meetings : [];
+    } catch (error) {
+      console.error("MORNI V4 meetings:", error);
+      return [];
+    }
+  }
+
+  function getNextMeeting() {
+    const now = Date.now();
+
+    return getMeetings()
+      .filter(meeting => {
+        const time = new Date(meeting.startAt).getTime();
+        return Number.isFinite(time) && time >= now;
+      })
+      .sort((a, b) =>
+        new Date(a.startAt) - new Date(b.startAt)
+      )[0] || null;
+  }
+
+  function getGmailSummary() {
+    const list = $("#ms-gmail-list");
+
+    if (!list) {
+      return {
+        count: 0,
+        text: "Gmail information is not currently visible."
+      };
+    }
+
+    const text = (list.innerText || "").trim();
+
+    const items = list.querySelectorAll(
+      ".ms-list-item, [data-email], .email-item"
+    );
+
+    return {
+      count: items.length,
+      text: text.slice(0, 1800)
+    };
+  }
+
+  function getNewsSummary() {
+    const news = $("#ms-news");
+    return news ? (news.innerText || "").trim().slice(0, 1200) : "";
+  }
+
+  function getMeetingTime(meeting) {
+    return new Date(meeting.startAt).toLocaleString([], {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      hour: "numeric",
+      minute: "2-digit"
+    });
+  }
+
+  function addStyles() {
+    if ($("#" + STYLE_ID)) return;
+
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+
+    style.textContent = `
+      #${PANEL_ID} {
+        margin: 24px 0;
+        color: var(--text, inherit);
+        font-family: inherit;
+      }
+
+      #${PANEL_ID} * { box-sizing: border-box; }
+
+      #${PANEL_ID} .mi4-heading {
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+        gap:14px;
+        flex-wrap:wrap;
+        margin-bottom:18px;
+      }
+
+      #${PANEL_ID} .mi4-kicker {
+        color:#bd823d;
+        font-size:11px;
+        font-weight:800;
+        letter-spacing:2px;
+      }
+
+      #${PANEL_ID} h2 {
+        margin:5px 0;
+        font-size:clamp(22px,3vw,30px);
+      }
+
+      #${PANEL_ID} .mi4-muted {
+        opacity:.72;
+        font-size:13px;
+        line-height:1.6;
+      }
+
+      #${PANEL_ID} .mi4-grid {
+        display:grid;
+        grid-template-columns:repeat(2,minmax(0,1fr));
+        gap:15px;
+      }
+
+      #${PANEL_ID} .mi4-card {
+        min-width:0;
+        padding:19px;
+        border:1px solid rgba(150,150,150,.2);
+        border-radius:18px;
+        background:var(--card-bg,rgba(255,255,255,.045));
+      }
+
+      #${PANEL_ID} .mi4-wide { grid-column:1/-1; }
+
+      #${PANEL_ID} .mi4-card h3 {
+        margin:0 0 10px;
+        font-size:16px;
+      }
+
+      #${PANEL_ID} .mi4-value {
+        font-size:15px;
+        line-height:1.7;
+        white-space:pre-wrap;
+        overflow-wrap:anywhere;
+      }
+
+      #${PANEL_ID} .mi4-weather-temp {
+        font-size:32px;
+        font-weight:800;
+        margin:8px 0;
+      }
+
+      #${PANEL_ID} .mi4-button {
+        border:0;
+        border-radius:11px;
+        padding:11px 15px;
+        margin:7px 6px 0 0;
+        cursor:pointer;
+        background:#bd823d;
+        color:white;
+        font-weight:750;
+        font-size:13px;
+      }
+
+      #${PANEL_ID} .mi4-button.secondary {
+        background:rgba(150,150,150,.17);
+        color:inherit;
+        border:1px solid rgba(150,150,150,.2);
+      }
+
+      #${PANEL_ID} .mi4-input {
+        width:100%;
+        min-width:0;
+        padding:12px;
+        margin:6px 0;
+        border-radius:10px;
+        border:1px solid rgba(150,150,150,.3);
+        background:var(--input-bg,rgba(120,120,120,.1));
+        color:inherit;
+        font:inherit;
+      }
+
+      #${PANEL_ID} .mi4-status {
+        font-size:12px;
+        opacity:.72;
+        margin-top:9px;
+        line-height:1.5;
+      }
+
+      #${PANEL_ID} .mi4-meeting {
+        padding:12px 0;
+        border-bottom:1px solid rgba(150,150,150,.18);
+      }
+
+      #${PANEL_ID} .mi4-meeting:last-child {
+        border-bottom:0;
+      }
+
+      @media(max-width:650px) {
+        #${PANEL_ID} .mi4-grid {
+          grid-template-columns:1fr;
+        }
+        #${PANEL_ID} .mi4-wide {
+          grid-column:auto;
+        }
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  function buildDashboard() {
+    const page = document.querySelector(
+      "#morni-services-panel .ms-page"
+    ) || [...document.querySelectorAll(".ms-page")]
+      .find(element => element.querySelector("#ms-gmail-list"));
+
+    if (!page) return false;
+
+    if ($("#" + PANEL_ID)) return true;
+
+    const dashboard = document.createElement("section");
+    dashboard.id = PANEL_ID;
+
+    dashboard.innerHTML = `
+      <div class="mi4-heading">
+        <div>
+          <div class="mi4-kicker">MORNI INTELLIGENCE · V4</div>
+          <h2>Your morning, intelligently organised.</h2>
+          <div class="mi4-muted">
+            Your meetings, inbox, weather and journey — in one place.
+          </div>
+        </div>
+        <button class="mi4-button" data-mi4="refresh">
+          Refresh intelligence
+        </button>
+      </div>
+
+      <div class="mi4-grid">
+
+        <section class="mi4-card mi4-wide">
+          <h3>✦ Your Morning Briefing</h3>
+          <div id="mi4-briefing" class="mi4-value">
+            Preparing your morning briefing...
+          </div>
+          <div class="mi4-status" id="mi4-briefing-status">
+            Uses information currently available in MORNI.
+          </div>
+        </section>
+
+        <section class="mi4-card">
+          <h3>☀ Live Weather</h3>
+          <div id="mi4-weather">
+            <div class="mi4-value">Location needed to load local weather.</div>
+          </div>
+          <button class="mi4-button" data-mi4="location">
+            Find my location
+          </button>
+          <button class="mi4-button secondary" data-mi4="weather">
+            Refresh weather
+          </button>
+        </section>
+
+        <section class="mi4-card">
+          <h3>◷ Next Meeting</h3>
+          <div id="mi4-next-meeting" class="mi4-value">
+            Checking your meeting schedule...
+          </div>
+          <button class="mi4-button secondary" data-mi4="meeting-route">
+            Open meeting directions
+          </button>
+        </section>
+
+        <section class="mi4-card mi4-wide">
+          <h3>⌖ Smart Commute Planner</h3>
+          <div class="mi4-muted">
+            Plan your departure using your saved meeting time,
+            estimated journey duration and preparation buffer.
+          </div>
+          <input class="mi4-input" id="mi4-destination"
+            placeholder="Meeting destination">
+          <input class="mi4-input" id="mi4-travel"
+            type="number" min="1" max="600" value="30"
+            placeholder="Estimated travel time in minutes">
+          <input class="mi4-input" id="mi4-buffer"
+            type="number" min="0" max="240" value="15"
+            placeholder="Extra buffer in minutes">
+          <div id="mi4-departure" class="mi4-value">
+            Select a meeting to calculate your departure.
+          </div>
+          <button class="mi4-button" data-mi4="calculate">
+            Calculate departure
+          </button>
+          <button class="mi4-button secondary" data-mi4="directions">
+            Get Google Maps directions
+          </button>
+          <div class="mi4-status">
+            Travel duration is your estimate. Google Maps provides
+            route information; this calculation does not independently
+            verify live traffic.
+          </div>
+        </section>
+
+        <section class="mi4-card">
+          <h3>✉ Inbox Overview</h3>
+          <div id="mi4-inbox" class="mi4-value">
+            Checking available inbox information...
+          </div>
+          <button class="mi4-button secondary" data-mi4="inbox">
+            Refresh Gmail
+          </button>
+        </section>
+
+        <section class="mi4-card">
+          <h3>▤ News Snapshot</h3>
+          <div id="mi4-news" class="mi4-value">
+            Checking your Services news feed...
+          </div>
+          <button class="mi4-button secondary" data-mi4="news">
+            Refresh news
+          </button>
+        </section>
+
+      </div>
+    `;
+
+    const hero = $(".ms-hero", page);
+
+    if (hero) {
+      hero.insertAdjacentElement("afterend", dashboard);
+    } else {
+      page.prepend(dashboard);
+    }
+
+    return true;
+  }
+
+  function renderMeetings() {
+    const meeting = getNextMeeting();
+    const output = $("#mi4-next-meeting");
+    if (!output) return;
+
+    if (!meeting) {
+      output.textContent = "No upcoming meetings found in your saved schedule.";
+      return;
+    }
+
+    output.innerHTML = `
+      <strong>${escapeHTML(meeting.title || "Scheduled meeting")}</strong>
+      <br>${escapeHTML(getMeetingTime(meeting))}
+      <br>📍 ${escapeHTML(meeting.venue || "No destination provided")}
+    `;
+
+    const destination = $("#mi4-destination");
+    const travel = $("#mi4-travel");
+    const buffer = $("#mi4-buffer");
+
+    if (destination && !destination.value && meeting.venue) {
+      destination.value = meeting.venue;
+    }
+
+    if (travel && meeting.travelMinutes != null) {
+      travel.value = meeting.travelMinutes;
+    }
+
+    if (buffer && meeting.bufferMinutes != null) {
+      buffer.value = meeting.bufferMinutes;
+    }
+  }
+
+  function renderInbox() {
+    const output = $("#mi4-inbox");
+    if (!output) return;
+
+    const summary = getGmailSummary();
+
+    output.textContent = summary.count
+      ? `${summary.count} visible email items.\n\n${summary.text.slice(0, 500)}`
+      : summary.text;
+  }
+
+  function renderNews() {
+    const output = $("#mi4-news");
+    if (!output) return;
+
+    const news = getNewsSummary();
+
+    output.textContent = news
+      ? news.slice(0, 650)
+      : "No news headlines are currently visible. Load news in the Daily News card.";
+  }
+
+  function renderBriefing() {
+    const output = $("#mi4-briefing");
+    if (!output) return;
+
+    const meeting = getNextMeeting();
+    const inbox = getGmailSummary();
+    const news = getNewsSummary();
+
+    const parts = [];
+
+    const hour = new Date().getHours();
+    parts.push(
+      hour < 12 ? "Good morning!" :
+      hour < 17 ? "Good afternoon!" : "Good evening!"
+    );
+
+    if (meeting) {
+      parts.push(
+        `Your next meeting is "${meeting.title || "Scheduled meeting"}" at ${getMeetingTime(meeting)}.`
+      );
+
+      if (meeting.venue) {
+        parts.push(`Your meeting destination is ${meeting.venue}.`);
+      }
+    } else {
+      parts.push("There are no upcoming meetings in your saved schedule.");
+    }
+
+    if (inbox.count) {
+      parts.push(
+        `MORNI can currently see ${inbox.count} visible email items in your inbox panel.`
+      );
+    } else {
+      parts.push(
+        "Your inbox summary is limited until Gmail is connected and its messages are loaded."
+      );
+    }
+
+    if (currentWeather) {
+      parts.push(
+        `Current local weather: ${currentWeather.temperature}°C, ${currentWeather.description}.`
+      );
+      parts.push(currentWeather.advice);
+    } else {
+      parts.push("Share your location to include local weather advice.");
+    }
+
+    if (news) {
+      const firstHeadline = news.split("\n").map(x => x.trim()).find(Boolean);
+      if (firstHeadline) {
+        parts.push(`Your news feed currently includes: ${firstHeadline.slice(0, 180)}.`);
+      }
+    } else {
+      parts.push("Load Daily News to include local headlines in your briefing.");
+    }
+
+    output.textContent = parts.join("\n\n");
+  }
+
+  function weatherDescription(code) {
+    if (code === 0) return "Clear sky";
+    if ([1, 2].includes(code)) return "Mainly clear or partly cloudy";
+    if (code === 3) return "Overcast";
+    if ([45, 48].includes(code)) return "Foggy";
+    if ([51, 53, 55, 56, 57].includes(code)) return "Drizzle";
+    if ([61, 63, 65, 66, 67, 80, 81, 82].includes(code)) return "Rain";
+    if ([71, 73, 75, 77, 85, 86].includes(code)) return "Snow";
+    if ([95, 96, 99].includes(code)) return "Thunderstorms";
+    return "Variable conditions";
+  }
+
+  function weatherAdvice(code, temperature) {
+    const advice = [];
+
+    if ([61,63,65,80,81,82,95,96,99].includes(code)) {
+      advice.push("Rain is possible. Consider carrying an umbrella.");
+    }
+
+    if (temperature >= 32) {
+      advice.push("It may feel hot. Stay hydrated.");
+    } else if (temperature <= 18) {
+      advice.push("Consider carrying a light layer.");
+    }
+
+    return advice.join(" ") || "Check conditions again before heading out.";
+  }
+
+  async function loadWeather() {
+    if (!currentLocation || weatherBusy) return;
+
+    weatherBusy = true;
+    const output = $("#mi4-weather");
+    if (output) output.textContent = "Loading local weather...";
+
+    try {
+      const { latitude, longitude } = currentLocation;
+
+      const url = new URL("https://api.open-meteo.com/v1/forecast");
+      url.search = new URLSearchParams({
+        latitude,
+        longitude,
+        current: "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m"
+      }).toString();
+
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Weather service unavailable");
+
+      const data = await response.json();
+      const current = data.current;
+
+      currentWeather = {
+        temperature: Math.round(current.temperature_2m),
+        description: weatherDescription(current.weather_code),
+        advice: weatherAdvice(
+          current.weather_code,
+          current.temperature_2m
+        )
+      };
+
+      if (output) {
+        output.innerHTML = `
+          <div class="mi4-weather-temp">
+            ${currentWeather.temperature}°C
+          </div>
+          <strong>${escapeHTML(currentWeather.description)}</strong>
+          <div class="mi4-muted">
+            Feels like ${Math.round(current.apparent_temperature)}°C
+            · Humidity ${current.relative_humidity_2m}%
+            · Wind ${Math.round(current.wind_speed_10m)} km/h
+          </div>
+          <p>${escapeHTML(currentWeather.advice)}</p>
+        `;
+      }
+
+      renderBriefing();
+    } catch (error) {
+      console.error("MORNI V4 weather:", error);
+      if (output) {
+        output.textContent = "Weather could not load. Please try again.";
+      }
+    } finally {
+      weatherBusy = false;
+    }
+  }
+
+  function locate() {
+    if (!navigator.geolocation) {
+      alert("Location is not supported by this browser.");
+      return;
+    }
+
+    const output = $("#mi4-weather");
+    if (output) output.textContent = "Requesting location permission...";
+
+    navigator.geolocation.getCurrentPosition(
+      position => {
+        currentLocation = {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude
+        };
+
+        loadWeather();
+      },
+      error => {
+        console.warn("MORNI V4 location:", error);
+        if (output) {
+          output.textContent =
+            "Location permission was unavailable. Check browser location permissions and try again.";
+        }
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 12000,
+        maximumAge: 300000
+      }
+    );
+  }
+
+  function calculateDeparture() {
+    const meeting = getNextMeeting();
+    const result = $("#mi4-departure");
+
+    if (!meeting) {
+      if (result) result.textContent = "No upcoming meeting is available.";
+      return;
+    }
+
+    const destination = ($("#mi4-destination")?.value || "").trim();
+    const travel = Number($("#mi4-travel")?.value);
+    const buffer = Number($("#mi4-buffer")?.value);
+
+    if (!destination) {
+      if (result) result.textContent = "Enter the meeting destination first.";
+      return;
+    }
+
+    if (!Number.isFinite(travel) || travel < 1 ||
+        !Number.isFinite(buffer) || buffer < 0) {
+      if (result) result.textContent = "Enter valid travel and buffer times.";
+      return;
+    }
+
+    const meetingTime = new Date(meeting.startAt);
+    const departure = new Date(
+      meetingTime.getTime() - (travel + buffer) * 60000
+    );
+
+    if (result) {
+      result.textContent =
+        `Meeting: ${getMeetingTime(meeting)}\n` +
+        `Estimated travel: ${travel} minutes\n` +
+        `Preparation buffer: ${buffer} minutes\n\n` +
+        `Suggested departure: ${departure.toLocaleTimeString([], {
+          hour: "numeric",
+          minute: "2-digit"
+        })}`;
+    }
+  }
+
+  function openDirections() {
+    const destination = ($("#mi4-destination")?.value || "").trim();
+
+    if (!destination) {
+      alert("Enter a destination first.");
+      return;
+    }
+
+    const url = new URL("https://www.google.com/maps/dir/");
+    url.searchParams.set("api", "1");
+    url.searchParams.set("destination", destination);
+
+    if (currentLocation) {
+      url.searchParams.set(
+        "origin",
+        `${currentLocation.latitude},${currentLocation.longitude}`
+      );
+    }
+
+    url.searchParams.set("travelmode", "driving");
+    window.open(url.toString(), "_blank", "noopener");
+  }
+
+  function refresh() {
+    renderMeetings();
+    renderInbox();
+    renderNews();
+    renderBriefing();
+    calculateDeparture();
+  }
+
+  function handleClick(event) {
+    const button = event.target.closest("[data-mi4]");
+    if (!button || !button.closest("#" + PANEL_ID)) return;
+
+    const action = button.dataset.mi4;
+
+    if (action === "refresh") {
+      refresh();
+    }
+
+    if (action === "location") {
+      locate();
+    }
+
+    if (action === "weather") {
+      if (!currentLocation) locate();
+      else loadWeather();
+    }
+
+    if (action === "calculate") {
+      calculateDeparture();
+    }
+
+    if (action === "directions" || action === "meeting-route") {
+      const meeting = getNextMeeting();
+
+      if (action === "meeting-route" && meeting?.venue) {
+        const destination = $("#mi4-destination");
+        if (destination) destination.value = meeting.venue;
+      }
+
+      openDirections();
+    }
+
+    if (action === "inbox") {
+      const status = $("#mi4-inbox");
+      if (status) status.textContent = "Refreshing Gmail...";
+      Promise.resolve(BRIDGE?.refreshInbox?.())
+        .then(() => {
+          renderInbox();
+          renderBriefing();
+        })
+        .catch(error => {
+          console.error("MORNI V4 Gmail:", error);
+          renderInbox();
+        });
+    }
+
+    if (action === "news") {
+      const newsButton = $("#morni-services-panel [data-action='news']");
+      if (newsButton) newsButton.click();
+      setTimeout(() => {
+        renderNews();
+        renderBriefing();
+      }, 1800);
+    }
+  }
+
+  function initialise() {
+    addStyles();
+
+    if (!buildDashboard()) return;
+
+    refresh();
+
+    if (!document.__MORNI_V4_CLICK_HANDLER__) {
+      document.addEventListener("click", handleClick);
+      document.__MORNI_V4_CLICK_HANDLER__ = true;
+    }
+  }
+
+  // Wait for the original Services interface to become available.
+  // No global MutationObserver and no rapid polling loop.
+  document.addEventListener("click", () => {
+    setTimeout(initialise, 250);
+  }, true);
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initialise, {
+      once: true
+    });
+  } else {
+    initialise();
+  }
+
+  window.MORNI_V4 = {
+    refresh,
+    locate,
+    loadWeather,
+    calculateDeparture,
+    getMeetings
+  };
+
 })();
