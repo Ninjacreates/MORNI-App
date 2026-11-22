@@ -6135,96 +6135,151 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 /* =====================================================
    MORNI SERVICES — NAVIGATION & BRANDING POLISH
    ===================================================== */
+
+/* =========================================================
+   MORNI SERVICES — NATIVE SIDEBAR INTEGRATION
+   ========================================================= */
 (() => {
   "use strict";
 
+  const button = document.getElementById("morni-services-button");
+  const overlay = document.getElementById("morni-services-overlay");
+  const panel = document.getElementById("morni-services-panel");
+
+  if (!button || !overlay || !panel) return;
+
   const style = document.createElement("style");
+
   style.textContent = `
-    /* Put Services inside the existing MORNI navigation */
+    /* Native sidebar item */
     #morni-services-button {
       position: static !important;
-      right: auto !important;
-      bottom: auto !important;
+      inset: auto !important;
       z-index: auto !important;
-      display: inline-flex !important;
+      width: 100% !important;
+      min-height: 46px !important;
+      display: flex !important;
       align-items: center !important;
-      justify-content: center !important;
-      gap: 7px !important;
-      flex: 0 0 auto !important;
-      min-height: 38px !important;
-      padding: 9px 13px !important;
-      margin: 0 !important;
-      border: 1px solid rgba(39,82,53,.18) !important;
-      border-radius: 999px !important;
-      background: #f5ead4 !important;
-      color: #244d35 !important;
+      justify-content: flex-start !important;
+      gap: 13px !important;
+      padding: 0 16px !important;
+      margin: 5px 0 0 !important;
+      border: 0 !important;
+      border-radius: 12px !important;
+      background: transparent !important;
+      color: var(--muted,#68776b) !important;
       box-shadow: none !important;
-      font: 750 11px Arial,sans-serif !important;
-      white-space: nowrap !important;
+      font-family: inherit !important;
+      font-size: 13px !important;
+      font-weight: 650 !important;
+      text-align: left !important;
       cursor: pointer !important;
-      transition: .2s !important;
+      transition: background .22s ease, color .22s ease,
+                  transform .22s ease !important;
     }
 
     #morni-services-button:hover {
+      background: rgba(56,115,70,.10) !important;
+      color: #285b3b !important;
+      transform: translateX(3px) !important;
+    }
+
+    #morni-services-button.morni-sidebar-active {
       background: #244d35 !important;
       color: white !important;
-      border-color: #244d35 !important;
-      transform: translateY(-1px);
+      box-shadow: 0 5px 14px rgba(36,77,53,.15) !important;
+    }
+
+    #morni-services-button .morni-services-icon {
+      width: 23px;
+      height: 23px;
+      flex: 0 0 23px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: rgba(218,169,91,.19);
+      color: #c58a3d;
+      font-size: 15px;
     }
 
     body[data-theme="dark"] #morni-services-button {
-      background: #263b2d !important;
-      color: #f1e9d8 !important;
-      border-color: #506b50 !important;
+      color: #bdcbbb !important;
     }
 
     body[data-theme="dark"] #morni-services-button:hover {
+      background: rgba(140,190,130,.12) !important;
+      color: #dcebd5 !important;
+    }
+
+    body[data-theme="dark"] #morni-services-button.morni-sidebar-active {
       background: #3a7548 !important;
       color: white !important;
     }
 
-    /* Premium MORNI services window */
+    /* Smooth services window */
     #morni-services-overlay {
-      background: rgba(12,28,19,.76) !important;
-      backdrop-filter: blur(8px);
-      padding: 16px !important;
+      background: rgba(9,24,16,.66) !important;
+      backdrop-filter: blur(9px);
+      -webkit-backdrop-filter: blur(9px);
+      opacity: 0;
+      transition: opacity .22s ease;
+    }
+
+    #morni-services-overlay.morni-services-visible {
+      opacity: 1;
     }
 
     #morni-services-panel {
-      width: min(760px,100%) !important;
+      width: min(780px,100%) !important;
       max-height: 88vh !important;
       overflow-y: auto !important;
-      padding: clamp(18px,3vw,30px) !important;
-      border: 1px solid #d7c69e !important;
-      border-radius: 23px !important;
-      background: linear-gradient(145deg,#fffdf5,#f0f4e9) !important;
-      color: #193b2a !important;
-      box-shadow: 0 25px 80px rgba(0,0,0,.35) !important;
+      padding: clamp(20px,4vw,34px) !important;
+      border: 1px solid rgba(205,174,119,.48) !important;
+      border-radius: 25px !important;
+      background: linear-gradient(145deg,#fbfaf2,#edf3e8) !important;
+      color: #244332 !important;
+      box-shadow: 0 25px 90px rgba(0,0,0,.28) !important;
+      transform: translateY(14px) scale(.985);
+      transition: transform .25s cubic-bezier(.2,.8,.2,1);
+    }
+
+    #morni-services-overlay.morni-services-visible
+    #morni-services-panel {
+      transform: translateY(0) scale(1);
     }
 
     #morni-services-panel h2 {
+      font-family: inherit !important;
       color: #244d35 !important;
-      font-size: 26px !important;
-      letter-spacing: -.7px;
-      margin-bottom: 5px !important;
+      font-size: clamp(24px,4vw,32px) !important;
+      letter-spacing: -1px;
+      margin: 4px 0 5px !important;
     }
 
     #morni-services-panel > p {
       color: #718174 !important;
+      line-height: 1.6;
     }
 
     #morni-services-panel .morni-service-section {
-      background: rgba(255,255,255,.68) !important;
-      border: 1px solid rgba(47,107,69,.17) !important;
-      border-radius: 16px !important;
-      padding: 17px !important;
+      padding: 19px !important;
       margin: 14px 0 !important;
-      box-shadow: 0 5px 18px rgba(32,68,43,.045);
+      border: 1px solid rgba(48,99,62,.14) !important;
+      border-radius: 17px !important;
+      background: rgba(255,255,255,.62) !important;
+      box-shadow: 0 5px 18px rgba(30,65,40,.035);
+      transition: border-color .2s, transform .2s;
+    }
+
+    #morni-services-panel .morni-service-section:hover {
+      border-color: rgba(48,99,62,.34) !important;
     }
 
     #morni-services-panel .morni-service-section h3 {
       color: #285b3b !important;
       font-size: 16px !important;
+      font-weight: 800 !important;
+      margin-bottom: 12px !important;
     }
 
     #morni-services-panel .morni-service-button {
@@ -6233,13 +6288,15 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       border: 1px solid #2f6b45 !important;
       border-radius: 10px !important;
       padding: 10px 15px !important;
-      transition: .2s;
+      font-weight: 750 !important;
+      transition: .2s ease !important;
     }
 
     #morni-services-panel .morni-service-button:hover {
       background: #e5a14b !important;
       border-color: #e5a14b !important;
       color: #193b2a !important;
+      transform: translateY(-1px);
     }
 
     #morni-services-panel .morni-service-input {
@@ -6247,51 +6304,54 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       color: #193b2a !important;
       border: 1px solid #cbd8c7 !important;
       border-radius: 10px !important;
+      padding: 12px !important;
     }
 
     #morni-services-panel .morni-mail-item,
     #morni-services-panel .morni-news-item {
       padding: 13px 5px !important;
-      border-bottom: 1px solid rgba(47,107,69,.16) !important;
-      color: #193b2a !important;
+      border-bottom: 1px solid rgba(47,107,69,.15) !important;
+      color: #244332 !important;
+      line-height: 1.55;
     }
 
     #morni-services-panel a {
       color: #2f6b45 !important;
-      font-weight: 700;
+      font-weight: 750;
     }
 
     #morni-services-close {
-      background: #e5a14b !important;
-      color: #193b2a !important;
+      background: #f0dfc0 !important;
+      color: #244d35 !important;
+      border: 1px solid #e3c99c !important;
       border-radius: 10px !important;
-      font-weight: 800 !important;
+      padding: 9px 13px !important;
+      font-weight: 800;
     }
 
-    /* Dark mode */
+    /* Dark theme */
     body[data-theme="dark"] #morni-services-panel {
-      background: linear-gradient(145deg,#18291f,#213629) !important;
+      background: linear-gradient(145deg,#17271e,#203529) !important;
       color: #edf4e8 !important;
-      border-color: #506b50 !important;
+      border-color: #49634c !important;
     }
 
     body[data-theme="dark"] #morni-services-panel h2,
-    body[data-theme="dark"] #morni-services-panel .morni-service-section h3 {
-      color: #b8d9a8 !important;
+    body[data-theme="dark"] #morni-services-panel h3 {
+      color: #c1ddaF !important;
     }
 
-    body[data-theme="dark"] #morni-services-panel > p,
-    body[data-theme="dark"] #morni-services-panel .morni-service-message {
-      color: #c1cebd !important;
+    body[data-theme="dark"] #morni-services-panel > p {
+      color: #b7c7b6 !important;
     }
 
     body[data-theme="dark"] #morni-services-panel .morni-service-section {
       background: rgba(255,255,255,.045) !important;
-      border-color: #425b47 !important;
+      border-color: #405b46 !important;
     }
 
     body[data-theme="dark"] #morni-services-panel .morni-service-input {
-      background: #17251c !important;
+      background: #14231a !important;
       color: #edf4e8 !important;
       border-color: #526a55 !important;
     }
@@ -6299,52 +6359,90 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     body[data-theme="dark"] #morni-services-panel .morni-mail-item,
     body[data-theme="dark"] #morni-services-panel .morni-news-item {
       color: #edf4e8 !important;
-      border-color: #425b47 !important;
+      border-color: #405b46 !important;
     }
 
     body[data-theme="dark"] #morni-services-panel a {
-      color: #b8d9a8 !important;
+      color: #c1ddaf !important;
     }
 
-    @media(max-width:650px) {
-      #morni-services-button {
-        padding: 9px 11px !important;
-      }
+    body[data-theme="dark"] #morni-services-close {
+      background: #354a37 !important;
+      color: #edf4e8 !important;
+      border-color: #526a55 !important;
+    }
+
+    @media(max-width:760px) {
       #morni-services-panel {
         max-height: 92vh !important;
+        border-radius: 19px !important;
+      }
+    }
+
+    @media(prefers-reduced-motion:reduce) {
+      #morni-services-button,
+      #morni-services-panel,
+      #morni-services-overlay {
+        transition: none !important;
       }
     }
   `;
+
   document.head.appendChild(style);
 
-  // Move the existing button into MORNI's real navigation.
-  function placeServicesButton() {
-    const nav = document.querySelector(".morni-feature-nav");
-    const button = document.getElementById("morni-services-button");
-    const profile = nav?.querySelector(".morni-profile-button");
+  // Move the Services button into the real sidebar.
+  const sidebarNav = document.querySelector(".side-nav");
+  if (!sidebarNav) return;
 
-    if (!nav || !button) return;
+  button.className = "nav-btn";
+  button.innerHTML = `
+    <span class="morni-services-icon">✦</span>
+    <span>Connected Services</span>
+  `;
+  button.setAttribute("aria-label", "Open Connected Services");
 
-    if (button.parentElement !== nav) {
-      if (profile) {
-        nav.insertBefore(button, profile);
-      } else {
-        nav.appendChild(button);
-      }
-    }
+  const insightsButton = sidebarNav.querySelector(
+    '[data-page="insights"]'
+  );
+
+  if (insightsButton) {
+    insightsButton.insertAdjacentElement("afterend", button);
+  } else {
+    sidebarNav.appendChild(button);
   }
 
-  // MORNI rebuilds its navigation when pages change.
-  // Keep the Services button in the navigation after every render.
-  placeServicesButton();
+  function openServices() {
+    overlay.style.display = "flex";
+    button.classList.add("morni-sidebar-active");
+    requestAnimationFrame(() => {
+      overlay.classList.add("morni-services-visible");
+    });
+  }
 
-  const observer = new MutationObserver(() => {
-    placeServicesButton();
+  function closeServices() {
+    overlay.classList.remove("morni-services-visible");
+    button.classList.remove("morni-sidebar-active");
+
+    setTimeout(() => {
+      if (!overlay.classList.contains("morni-services-visible")) {
+        overlay.style.display = "none";
+      }
+    }, 230);
+  }
+
+  // Replace the original simple open/close behaviour.
+  button.onclick = openServices;
+  document.getElementById("morni-services-close").onclick = closeServices;
+
+  overlay.addEventListener("click", event => {
+    if (event.target === overlay) closeServices();
   });
 
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && overlay.style.display === "flex") {
+      closeServices();
+    }
   });
 
 })();
+
