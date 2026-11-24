@@ -11168,3 +11168,123 @@ window.MORNI_V4 = {
   }
   console.info("MORNI Chrome USB picker append-fix loaded.");
 })();
+
+
+/* ============================================================
+   MORNI — USB CONNECT BUTTON FIX V2
+   Paste this entire code at the VERY BOTTOM of app.js.
+   This version handles duplicate/dynamically rendered button IDs by
+   listening at document capture level. The Chrome picker is requested
+   synchronously during the real click gesture.
+   ============================================================ */
+(() => {
+  "use strict";
+  if (window.__MORNI_USB_CLICK_FIX_V2__) return;
+  window.__MORNI_USB_CLICK_FIX_V2__ = true;
+
+  let busy = false;
+
+  function show(message, good = false) {
+    const status = document.querySelector('#morniUsbStatus');
+    if (status) {
+      status.textContent = message;
+      status.style.color = good ? '#267344' : '#a15c22';
+    }
+  }
+
+  document.addEventListener('click', function (event) {
+    const button = event.target && event.target.closest
+      ? event.target.closest('#morniUsbConnect')
+      : null;
+    if (!button) return;
+
+    // Stop the app's old click handlers, but preserve this trusted click.
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+
+    if (busy) return;
+    if (!window.isSecureContext) {
+      show('Open MORNI using its HTTPS GitHub Pages address in desktop Chrome.');
+      return;
+    }
+    if (!navigator.serial || typeof navigator.serial.requestPort !== 'function') {
+      show('Web Serial is unavailable. Use desktop Chrome or Edge.');
+      return;
+    }
+
+    const bridge = window.MORNI_USB_BRIDGE;
+    if (!bridge || typeof bridge.connect !== 'function') {
+      show('USB bridge is missing. The updated app.js may not have loaded.');
+      return;
+    }
+    if (bridge.connected) {
+      show('MORNI is already connected over USB.', true);
+      return;
+    }
+
+    // Must remain synchronous inside this trusted click event.
+    let chosenPortPromise;
+    try {
+      show('Opening Chrome USB chooser… Select the NodeMCU / USB Serial device.');
+      chosenPortPromise = navigator.serial.requestPort();
+    } catch (error) {
+      show('Chrome USB chooser error: ' + (error?.message || String(error)));
+      return;
+    }
+
+    busy = true;
+    button.disabled = true;
+    button.textContent = 'Select MORNI in Chrome…';
+
+    // The existing bridge requests a port internally. Temporarily route that
+    // request to the exact promise created above from the trusted click.
+    const serial = navigator.serial;
+    const originalDescriptor = Object.getOwnPropertyDescriptor(serial, 'requestPort');
+    let overrideInstalled = false;
+    try {
+      Object.defineProperty(serial, 'requestPort', {
+        configurable: true,
+        writable: true,
+        value: () => chosenPortPromise
+      });
+      overrideInstalled = true;
+    } catch (error) {
+      busy = false;
+      button.disabled = false;
+      button.textContent = 'Connect MORNI by USB';
+      show('Could not pass the selected port to MORNI: ' + (error?.message || String(error)));
+      return;
+    }
+
+    let connectPromise;
+    try {
+      // Called immediately; bridge.connect captures chosenPortPromise before
+      // its first await, then performs the normal serial setup.
+      connectPromise = bridge.connect();
+    } catch (error) {
+      connectPromise = Promise.reject(error);
+    }
+
+    // Restore the native API without disturbing the pending chosen-port promise.
+    try {
+      if (originalDescriptor) {
+        Object.defineProperty(serial, 'requestPort', originalDescriptor);
+      } else {
+        delete serial.requestPort;
+      }
+    } catch (_) {}
+
+    Promise.resolve(connectPromise).then(() => {
+      show('MORNI USB connection opened at 115200 baud.', true);
+    }).catch(error => {
+      show('USB connection failed: ' + (error?.message || String(error)));
+    }).finally(() => {
+      busy = false;
+      button.disabled = false;
+      button.textContent = bridge.connected ? 'MORNI connected' : 'Connect MORNI by USB';
+    });
+  }, true);
+
+  console.info('MORNI USB click fix V2 loaded.');
+})();
