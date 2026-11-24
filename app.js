@@ -10667,10 +10667,35 @@ window.MORNI_V4 = {
       </section>`;
   }
 
+  function bindConnectButton() {
+    const button = $("morniUsbConnect");
+    if (!button) return;
+
+    // IMPORTANT: call requestPort directly in this button's own click handler.
+    // Web Serial requires a fresh user gesture; do not route this through a
+    // document-level delegated handler or an async helper first.
+    button.onclick = (event) => {
+      event.preventDefault();
+      if (button.dataset.morniConnecting === "1") return;
+      button.dataset.morniConnecting = "1";
+      button.disabled = true;
+      button.textContent = "Opening USB port…";
+      setStatus("Choose the MORNI / USB Serial (COM) port in Chrome.");
+      connect().catch(error => {
+        setStatus(error?.message || String(error));
+      }).finally(() => {
+        button.dataset.morniConnecting = "0";
+        button.disabled = false;
+        button.textContent = connected ? "MORNI connected" : "Connect MORNI by USB";
+      });
+    };
+  }
+
   function mount() {
-    // The original MORNI app can render Device Studio outside #pageContent
-    // depending on its navigation/layout version. Search the whole document.
+    // The original MORNI app renders Device Studio dynamically. Bind the
+    // button every time the panel is present, including after page rerenders.
     if ($("morniUsbPanel")) {
+      bindConnectButton();
       renderReminderList();
       return;
     }
@@ -10682,10 +10707,8 @@ window.MORNI_V4 = {
     const panel = document.createElement("div");
     panel.innerHTML = panelHTML();
     const usbPanel = panel.firstElementChild;
-
-    // Insert immediately after the visible Device Studio heading so the USB
-    // controls cannot be hidden inside an unrelated/incorrect page wrapper.
     heading.insertAdjacentElement("afterend", usbPanel);
+    bindConnectButton();
     renderReminderList();
   }
 
@@ -10892,12 +10915,9 @@ window.MORNI_V4 = {
   }
 
   document.addEventListener("click", event => {
-    const t = event.target;
-    if (t.closest("#morniUsbConnect")) {
-      event.preventDefault();
-      run(connect);
-      return;
-    }
+    const t = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (!t) return;
+    if (t.closest("#morniUsbConnect")) return; // handled directly on the button
     else if (t.closest("#morniUsbDisconnect")) run(disconnect);
     else if (t.closest("#morniUsbClock")) run(async () => {
       await send("CLOCK", Math.floor(Date.now() / 1000), -new Date().getTimezoneOffset() * 60);
