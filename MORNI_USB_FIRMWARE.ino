@@ -40,6 +40,7 @@ const unsigned long LCD_REFRESH = 200UL;
 const unsigned long WIFI_RETRY = 20000UL;
 const unsigned long NEWS_SCROLL_TIME = 400UL;
 const unsigned long MESSAGE_TIME = 3000UL;
+const unsigned long SCHOOL_ROTATE_TIME = 2800UL;
 
 // OBJECTS
 LiquidCrystal_I2C lcd(LCD_ADDRESS, 16, 2);
@@ -92,6 +93,8 @@ String oldLine2 = "";
 
 int newsIndex = 0;
 int newsOffset = 0;
+unsigned long lastSchoolRotate = 0;
+int schoolDisplayIndex = 0;
 
 const char* news[] = {
   "Space: Moon missions",
@@ -102,6 +105,19 @@ const char* news[] = {
 };
 
 const int NEWS_COUNT = 5;
+
+#define SCHOOL_MAGIC 0x5343484CUL
+struct SchoolItem {
+  char label[13];
+  uint8_t done;
+  uint8_t configured;
+};
+struct SchoolStore {
+  uint32_t magic;
+  SchoolItem items[4];
+};
+SchoolStore schoolStore;
+
 
 const int MAX_EVENTS = 12;
 String eventLog[MAX_EVENTS];
@@ -473,8 +489,48 @@ void updateLCD() {
   lcdWriteLine(0, "MORNI " + getClockText(), oldLine1);
 
   if (state == WAITING) {
-    updateNews();
-    lcdWriteLine(1, getNewsWindow(), oldLine2);
+    // Rotate school readiness on the LCD between the existing news headlines.
+    bool anySchoolTask = false;
+    bool allSchoolReady = true;
+    for (int i = 0; i < 4; i++) {
+      if (schoolStore.items[i].configured) {
+        anySchoolTask = true;
+        if (!schoolStore.items[i].done) allSchoolReady = false;
+      }
+    }
+
+    if (anySchoolTask) {
+      if (millis() - lastSchoolRotate >= SCHOOL_ROTATE_TIME) {
+        lastSchoolRotate = millis();
+        schoolDisplayIndex = (schoolDisplayIndex + 1) % 5;
+      }
+
+      if (allSchoolReady) {
+        lcdWriteLine(1, "SCHOOL READY!", oldLine2);
+      } else if (schoolDisplayIndex == 0) {
+        lcdWriteLine(1, "School checklist", oldLine2);
+      } else {
+        int shown = -1;
+        int seen = 0;
+        for (int i = 0; i < 4; i++) {
+          if (schoolStore.items[i].configured) {
+            seen++;
+            if (seen == schoolDisplayIndex) { shown = i; break; }
+          }
+        }
+        if (shown >= 0) {
+          String line = String(schoolStore.items[shown].label) + ":" +
+            (schoolStore.items[shown].done ? " DONE" : " TODO");
+          lcdWriteLine(1, line, oldLine2);
+        } else {
+          updateNews();
+          lcdWriteLine(1, getNewsWindow(), oldLine2);
+        }
+      }
+    } else {
+      updateNews();
+      lcdWriteLine(1, getNewsWindow(), oldLine2);
+    }
   }
   else if (state == READY_FOR_PASTE) {
     lcdWriteLine(1, "Remove brush", oldLine2);
@@ -524,6 +580,19 @@ void initReminderStore() {
     reminderStore.magic = REMINDER_MAGIC;
     saveReminderStore();
   }
+
+  EEPROM.get(sizeof(ReminderStore), schoolStore);
+  if (schoolStore.magic != SCHOOL_MAGIC) {
+    memset(&schoolStore, 0, sizeof(schoolStore));
+    schoolStore.magic = SCHOOL_MAGIC;
+    EEPROM.put(sizeof(ReminderStore), schoolStore);
+    EEPROM.commit();
+  }
+}
+
+void saveSchoolStore() {
+  EEPROM.put(sizeof(ReminderStore), schoolStore);
+  EEPROM.commit();
 }
 
 String serialStateName() {
@@ -588,6 +657,33 @@ void handleSerialRequest(String line) {
       return;
     }
     serialReply(id, "OK|COMMAND");
+    return;
+  }
+
+  if (op == "SCHOOL") {
+    int firstSep = args.indexOf('|');
+    int secondSep = firstSep < 0 ? -1 : args.indexOf('|', firstSep + 1);
+    if (firstSep < 0 || secondSep < 0) {
+      serialReply(id, "ERR|Use index|done|label");
+      return;
+    }
+    int index = args.substring(0, firstSep).toInt();
+    int done = args.substring(firstSep + 1, secondSep).toInt();
+    String label = args.substring(secondSep + 1);
+    label.trim();
+    if (index < 0 || index >= 4 || label.length() == 0 || label.length() > 12) {
+      serialReply(id, "ERR|Invalid school checklist item");
+      return;
+    }
+    SchoolItem &item = schoolStore.items[index];
+    memset(item.label, 0, sizeof(item.label));
+    label.toCharArray(item.label, sizeof(item.label));
+    item.done = done ? 1 : 0;
+    item.configured = 1;
+    saveSchoolStore();
+    resetLCDCache();
+    addEvent(String("School item ") + label + (done ? " complete" : " pending"));
+    serialReply(id, "OK|SCHOOL|" + String(index));
     return;
   }
 
