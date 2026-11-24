@@ -803,6 +803,34 @@
     }, 200);
   }
 
+  async function syncSchoolChecklistToLCD(options = {}) {
+    const bridge = window.MORNI_USB_BRIDGE;
+    if (!bridge?.connected || typeof bridge.send !== "function") {
+      if (!options.silent) toast("Connect MORNI by USB in Device Studio first.");
+      return false;
+    }
+
+    const items = [
+      ["Uniform", "uniform"],
+      ["School bag", "bag"],
+      ["Water bottle", "bottle"],
+      ["Homework", "homework"]
+    ];
+
+    try {
+      for (let i = 0; i < items.length; i++) {
+        const [label, key] = items[i];
+        await bridge.send("SCHOOL", i, state.checklist[key] ? 1 : 0, label);
+      }
+      if (!options.silent) toast("School checklist synced to MORNI's LCD.");
+      return true;
+    } catch (error) {
+      console.warn("MORNI school checklist LCD sync failed:", error);
+      if (!options.silent) toast("LCD sync failed. Upload the updated MORNI firmware first.");
+      return false;
+    }
+  }
+
   function toggleChecklist(id) {
     if (!(id in state.checklist)) return;
 
@@ -816,6 +844,10 @@
 
     save();
     render();
+
+    if (window.MORNI_USB_BRIDGE?.connected) {
+      syncSchoolChecklistToLCD({ silent: false });
+    }
   }
 
   function simulateEvent(type) {
@@ -1776,11 +1808,11 @@ function routine() {
             <button type="button" id="morniUsbSendMessage">Send to LCD</button>
           </div>
           <div style="padding:14px;border:1px solid #ddd;border-radius:12px">
-            <b>Schedule an LCD reminder</b>
+            <b>Schedule a meeting / task reminder</b>
             <input id="morniUsbWhen" type="datetime-local" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
-            <input id="morniUsbReminderText" maxlength="16" placeholder="Reminder (max 16 chars)" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
+            <input id="morniUsbReminderText" maxlength="16" placeholder="e.g. Meeting 10:30 (16 chars)" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
             <button type="button" id="morniUsbAddReminder">Save reminder to MORNI</button>
-            <small style="display:block;margin-top:7px;opacity:.7">Up to 5 reminders are stored on the ESP8266 and survive a power restart using EEPROM.</small>
+            <small style="display:block;margin-top:7px;opacity:.7">Up to 5 meeting or task reminders are stored on the ESP8266. The LCD displays each one when it is due, even after the laptop is disconnected.</small>
           </div>
         </div>
         <div style="margin-top:12px"><b>Saved reminders</b><div id="morniUsbReminderList"></div></div>
@@ -1982,6 +2014,10 @@ function routine() {
               </label>
             `).join("")}
           </div>
+          <button class="btn btn-primary" data-action="sync-school-lcd" style="margin-top:14px">
+            ↗ Sync checklist to MORNI LCD
+          </button>
+          <p class="muted" style="margin:8px 0 0">MORNI will show the next unfinished item. When all four are checked, the LCD celebrates: SCHOOL READY!</p>
         `)}
 
         ${card("A calmer exit", `
@@ -4911,6 +4947,10 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
         });
       }
 
+      if (action === "sync-school-lcd") {
+        syncSchoolChecklistToLCD();
+      }
+
       if (action === "save-connection") {
         saveConnectionFromForm();
       }
@@ -5077,6 +5117,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     save();
     updateConnection();
     await pollDevice();
+    await syncSchoolChecklistToLCD({ silent: true });
   });
 
   window.addEventListener("morni-usb-disconnected", () => {
