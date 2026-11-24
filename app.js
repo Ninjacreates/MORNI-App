@@ -24,10 +24,6 @@
 
 
 
-
-
-
-
 /* =========================================================
    MORNI — Smart Morning Ecosystem
    Complete app.js replacement
@@ -10677,52 +10673,49 @@ window.MORNI_V4 = {
   }
 
   function bindConnectButton() {
-    // No per-element binding: the document-level capture listener below
-    // handles this button even when Device Studio replaces its DOM.
+    const button = $("morniUsbConnect");
+    if (!button || button.dataset.morniUsbBound === "1") return;
+    button.dataset.morniUsbBound = "1";
+
+    // Attach directly to the real Device Studio button. requestPort() runs
+    // synchronously in this trusted click event, before any async operation.
+    button.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (button.dataset.morniConnecting === "1" || connected) return;
+
+      if (!window.isSecureContext) {
+        setStatus("Open the MORNI GitHub Pages HTTPS site in desktop Chrome.");
+        return;
+      }
+      if (!navigator.serial || typeof navigator.serial.requestPort !== "function") {
+        setStatus("Web Serial is unavailable. Use desktop Chrome or Edge, not an embedded preview.");
+        return;
+      }
+
+      let portPromise;
+      try {
+        // Keep this exact call directly inside the physical button click.
+        portPromise = navigator.serial.requestPort();
+      } catch (error) {
+        setStatus("Chrome USB picker error: " + (error?.message || String(error)));
+        return;
+      }
+
+      button.dataset.morniConnecting = "1";
+      button.disabled = true;
+      button.textContent = "Choose MORNI USB port in Chrome…";
+      setStatus("Chrome should display the USB device picker. Select the USB Serial (COM) device.");
+
+      connect(portPromise).catch(error => {
+        setStatus("USB connection failed: " + (error?.message || String(error)));
+      }).finally(() => {
+        button.dataset.morniConnecting = "0";
+        button.disabled = false;
+        button.textContent = connected ? "MORNI connected" : "Connect MORNI by USB";
+      });
+    }, { capture: true });
   }
-
-  // Install once, immediately, at document level. Capture phase runs before
-  // the app's own click handlers and does not depend on MutationObserver timing.
-  document.addEventListener("click", event => {
-    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-    const button = target?.closest("#morniUsbConnect");
-    if (!button) return;
-
-    event.preventDefault();
-    event.stopPropagation();
-    if (button.dataset.morniConnecting === "1" || connected) return;
-
-    if (!navigator.serial) {
-      setStatus("Web Serial is unavailable. Open this site in desktop Chrome or Edge over HTTPS.");
-      return;
-    }
-    if (!window.isSecureContext) {
-      setStatus("Open the HTTPS GitHub Pages site, not an HTTP copy.");
-      return;
-    }
-
-    // Critical: invoke requestPort synchronously in the real click event.
-    let portChoice;
-    try {
-      portChoice = navigator.serial.requestPort();
-    } catch (error) {
-      setStatus(error?.message || String(error));
-      return;
-    }
-
-    button.dataset.morniConnecting = "1";
-    button.disabled = true;
-    button.textContent = "Choose USB port in Chrome…";
-    setStatus("Chrome should now show the USB port picker. Select the MORNI / USB Serial (COM) device.");
-
-    connect(portChoice).catch(error => {
-      setStatus(error?.message || String(error));
-    }).finally(() => {
-      button.dataset.morniConnecting = "0";
-      button.disabled = false;
-      button.textContent = connected ? "MORNI connected" : "Connect MORNI by USB";
-    });
-  }, true);
 
   function mount() {
     // The original MORNI app renders Device Studio dynamically. Bind the
@@ -11020,5 +11013,4 @@ window.MORNI_V4 = {
     get connected() { return connected; }
   };
 })();
-
 
