@@ -23,9 +23,6 @@
 
 
 
-
-
-
 /* =========================================================
    MORNI — Smart Morning Ecosystem
    Complete app.js replacement
@@ -10621,14 +10618,21 @@ window.MORNI_V4 = {
   }
 
   function mount() {
-    const root = document.querySelector("#pageContent");
-    if (!root || $("morniUsbPanel")) return;
-    const heading = [...root.querySelectorAll("h1")].find(h => /device studio/i.test(h.textContent));
+    // The original MORNI app can render Device Studio outside #pageContent
+    // depending on its navigation/layout version. Search the whole document.
+    if ($("morniUsbPanel")) return;
+
+    const heading = [...document.querySelectorAll("h1,h2")]
+      .find(h => /device studio/i.test((h.textContent || "").trim()));
     if (!heading) return;
-    const page = heading.closest(".page-enter") || root;
+
     const panel = document.createElement("div");
     panel.innerHTML = panelHTML();
-    page.insertBefore(panel.firstElementChild, page.children[1] || null);
+    const usbPanel = panel.firstElementChild;
+
+    // Insert immediately after the visible Device Studio heading so the USB
+    // controls cannot be hidden inside an unrelated/incorrect page wrapper.
+    heading.insertAdjacentElement("afterend", usbPanel);
     renderReminderList();
   }
 
@@ -10824,7 +10828,9 @@ window.MORNI_V4 = {
 
   const observer = new MutationObserver(mount);
   function start() {
-    observer.observe(document.querySelector("#pageContent") || document.body, {
+    // Observe the whole app because its router may replace content outside
+    // the #pageContent element used by older layouts.
+    observer.observe(document.body, {
       childList: true, subtree: true
     });
     mount();
