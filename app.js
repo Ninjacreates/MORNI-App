@@ -10808,11 +10808,20 @@ window.MORNI_V4 = {
     }
   }
 
+  // Capture the USB connect click before the app's own navigation handlers.
+  // Web Serial requestPort() must be called directly during a user gesture.
   document.addEventListener("click", event => {
-    const t = event.target;
-    if (t.closest("#morniUsbConnect")) run(connect);
-    else if (t.closest("#morniUsbDisconnect")) run(disconnect);
-    else if (t.closest("#morniUsbClock")) run(async () => {
+    const t = event.target instanceof Element ? event.target : event.target?.parentElement;
+    if (!t) return;
+    const connectButton = t.closest("#morniUsbConnect");
+    const disconnectButton = t.closest("#morniUsbDisconnect");
+    if (connectButton || disconnectButton) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      run(connectButton ? connect : disconnect);
+      return;
+    }
+    if (t.closest("#morniUsbClock")) run(async () => {
       await send("CLOCK", Math.floor(Date.now() / 1000), -new Date().getTimezoneOffset() * 60);
     });
     else if (t.closest("#morniUsbSendMessage")) run(async () => {
@@ -10848,7 +10857,7 @@ window.MORNI_V4 = {
       saveReminders(items);
       renderReminderList();
     });
-  });
+  }, true);
 
   // Keep the existing site timer buttons connected to the physical brush timer too.
   document.addEventListener("click", event => {
@@ -10887,4 +10896,8 @@ window.MORNI_V4 = {
     get connected() { return connected; }
   };
 })();
+
+
+
+
 
