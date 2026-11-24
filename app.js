@@ -810,10 +810,11 @@
       return false;
     }
 
+    // Keep LCD labels short enough for a 16-character display line.
     const items = [
       ["Uniform", "uniform"],
-      ["School bag", "bag"],
-      ["Water bottle", "bottle"],
+      ["Bag", "bag"],
+      ["Water", "bottle"],
       ["Homework", "homework"]
     ];
 
