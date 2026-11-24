@@ -17,6 +17,11 @@
 
 
 
+
+
+
+
+
 /* =========================================================
    MORNI — Smart Morning Ecosystem
    Complete app.js replacement
@@ -10522,3 +10527,315 @@ window.MORNI_V4 = {
   }
 
 })();
+
+
+
+/* ============================================================
+   MORNI USB HARDWARE BRIDGE
+   GitHub Pages (HTTPS) -> Chrome Web Serial -> ESP8266 USB
+   Keeps laptop internet on SNIT; ESP8266 does not join Wi-Fi.
+   ============================================================ */
+(() => {
+  "use strict";
+  if (window.__MORNI_USB_BRIDGE_INSTALLED__) return;
+  window.__MORNI_USB_BRIDGE_INSTALLED__ = true;
+
+  const STORE = "morni_usb_reminders_v1";
+  let port = null, reader = null, writer = null, readTask = null;
+  let buffer = "", sequence = 1, connected = false;
+  const pending = new Map();
+  let statusTimer = null;
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+  })[c]);
+
+  function reminders() {
+    try { return JSON.parse(localStorage.getItem(STORE) || "[]"); }
+    catch { return []; }
+  }
+  function saveReminders(items) {
+    localStorage.setItem(STORE, JSON.stringify(items));
+  }
+  function setStatus(message, good = false) {
+    const el = $("morniUsbStatus");
+    if (el) {
+      el.textContent = message;
+      el.style.color = good ? "#267344" : "#a15c22";
+    }
+  }
+  function renderReminderList() {
+    const el = $("morniUsbReminderList");
+    if (!el) return;
+    const items = reminders();
+    el.innerHTML = items.length ? items.map((item, i) => `
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid #ddd">
+        <span><b>${esc(item.text)}</b><br><small>${esc(new Date(item.when).toLocaleString())}</small></span>
+        <button type="button" data-morni-remove="${i}" style="padding:7px 10px">Remove</button>
+      </div>`).join("") : "<small>No reminders saved in this browser yet.</small>";
+  }
+
+  function panelHTML() {
+    return `
+      <section id="morniUsbPanel" style="margin:18px 0;padding:20px;border:1px solid #cbd8c7;border-radius:18px;background:var(--card-bg,#fff);color:var(--text,inherit)">
+        <div style="font-size:11px;letter-spacing:2px;font-weight:800;color:#b77935">MORNI · DIRECT USB LINK</div>
+        <h2 style="margin:6px 0 4px">Connect your physical station</h2>
+        <p style="margin:0 0 12px;opacity:.75">Keep your laptop connected to SNIT. The ESP8266 communicates through its USB cable, not a second Wi-Fi network.</p>
+        <button type="button" id="morniUsbConnect" style="padding:11px 16px;border:0;border-radius:10px;background:#347b45;color:white;font-weight:700">Connect MORNI by USB</button>
+        <button type="button" id="morniUsbDisconnect" style="padding:11px 16px;border:0;border-radius:10px">Disconnect</button>
+        <p id="morniUsbStatus" role="status" style="font-weight:700;margin:12px 0">Not connected. Close Arduino Serial Monitor before connecting.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0">
+          <button type="button" data-morni-command="start">Wake MORNI</button>
+          <button type="button" data-morni-command="paste">Start paste</button>
+          <button type="button" data-morni-command="brush">Start 2-min brush</button>
+          <button type="button" data-morni-command="pause">Pause</button>
+          <button type="button" data-morni-command="resume">Resume</button>
+          <button type="button" data-morni-command="reset">Reset</button>
+          <button type="button" data-morni-display="on">LCD ON</button>
+          <button type="button" data-morni-display="off">LCD OFF</button>
+          <button type="button" id="morniUsbClock">Sync RTC from laptop</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-top:14px">
+          <div style="padding:14px;border:1px solid #ddd;border-radius:12px">
+            <b>LCD message</b>
+            <input id="morniUsbMessage" maxlength="16" placeholder="Max 16 characters" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
+            <button type="button" id="morniUsbSendMessage">Send to LCD</button>
+          </div>
+          <div style="padding:14px;border:1px solid #ddd;border-radius:12px">
+            <b>Schedule an LCD reminder</b>
+            <input id="morniUsbWhen" type="datetime-local" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
+            <input id="morniUsbReminderText" maxlength="16" placeholder="Reminder (max 16 chars)" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
+            <button type="button" id="morniUsbAddReminder">Save reminder to MORNI</button>
+            <small style="display:block;margin-top:7px;opacity:.7">Up to 5 reminders are stored on the ESP8266 and survive a power restart using EEPROM.</small>
+          </div>
+        </div>
+        <div style="margin-top:12px"><b>Saved reminders</b><div id="morniUsbReminderList"></div></div>
+        <div id="morniUsbLive" style="margin-top:12px;padding:10px;border-radius:10px;background:rgba(80,130,80,.08)">Hardware status: waiting for connection</div>
+      </section>`;
+  }
+
+  function mount() {
+    const root = document.querySelector("#pageContent");
+    if (!root || $("morniUsbPanel")) return;
+    const heading = [...root.querySelectorAll("h1")].find(h => /device studio/i.test(h.textContent));
+    if (!heading) return;
+    const page = heading.closest(".page-enter") || root;
+    const panel = document.createElement("div");
+    panel.innerHTML = panelHTML();
+    page.insertBefore(panel.firstElementChild, page.children[1] || null);
+    renderReminderList();
+  }
+
+  function handleLine(line) {
+    if (!line.startsWith("MORNI|")) return; // Ignore ordinary boot/debug messages.
+    const parts = line.split("|");
+    const id = parts[1];
+
+    if (id === "EVENT") {
+      if (parts[2] === "REMINDER") setStatus("A scheduled reminder was displayed on the LCD.", true);
+      return;
+    }
+    if (id === "READY") {
+      setStatus("MORNI is ready over USB.", true);
+      return;
+    }
+    const task = pending.get(id);
+    if (!task) return;
+
+    pending.delete(id);
+    clearTimeout(task.timeout);
+    if (parts[2] === "ERR") task.reject(new Error(parts.slice(3).join("|") || "ESP8266 error"));
+    else if (parts[2] === "STATUS") {
+      task.resolve({
+        time: parts[3], timer: parts[4], state: parts[5],
+        rtc: parts[6] === "1", lcd: parts[7] === "1", brush: parts[8] === "1"
+      });
+    } else task.resolve(parts.slice(2));
+  }
+
+  async function readLoop() {
+    const decoder = new TextDecoder();
+    try {
+      while (port && port.readable) {
+        reader = port.readable.getReader();
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split(/\r?\n/);
+            buffer = lines.pop() || "";
+            lines.forEach(line => handleLine(line.trim()));
+          }
+        } finally {
+          reader.releaseLock();
+          reader = null;
+        }
+      }
+    } catch (error) {
+      if (connected) setStatus("USB read stopped: " + error.message);
+    }
+  }
+
+  async function send(op, ...args) {
+    if (!connected || !writer) throw new Error("Connect MORNI by USB first.");
+    const id = String(sequence++);
+    const line = `REQ|${id}|${op}${args.length ? "|" + args.join("|") : ""}\n`;
+    const promise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error("MORNI did not reply. Check USB cable and firmware."));
+      }, 4500);
+      pending.set(id, { resolve, reject, timeout });
+    });
+    await writer.write(new TextEncoder().encode(line));
+    return promise;
+  }
+
+  async function connect() {
+    if (!("serial" in navigator)) {
+      throw new Error("Web Serial is unavailable. Use desktop Chrome or Edge on the GitHub Pages HTTPS site.");
+    }
+    if (!window.isSecureContext) throw new Error("Open the HTTPS GitHub Pages address, not a local HTTP copy.");
+    if (connected) return;
+
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      writer = port.writable.getWriter();
+      connected = true;
+      setStatus("USB opened. Waiting for MORNI to restart…", true);
+      readTask = readLoop();
+
+      // Opening the serial port resets most NodeMCU boards.
+      await new Promise(resolve => setTimeout(resolve, 2200));
+      await send("CLOCK", Math.floor(Date.now() / 1000), -new Date().getTimezoneOffset() * 60);
+      await refreshStatus();
+      clearInterval(statusTimer);
+      statusTimer = setInterval(refreshStatus, 2500);
+      setStatus("MORNI connected. Laptop internet remains on SNIT.", true);
+    } catch (error) {
+      try { await disconnect(); } catch {}
+      throw error;
+    }
+  }
+
+  async function disconnect() {
+    connected = false;
+    clearInterval(statusTimer);
+    for (const [id, task] of pending) {
+      clearTimeout(task.timeout);
+      task.reject(new Error("USB disconnected"));
+      pending.delete(id);
+    }
+    try { if (reader) await reader.cancel(); } catch {}
+    try { if (readTask) await readTask; } catch {}
+    readTask = null;
+    try { if (writer) { writer.releaseLock(); writer = null; } } catch {}
+    try { if (port) await port.close(); } catch {}
+    port = null;
+    setStatus("USB disconnected.");
+  }
+
+  async function refreshStatus() {
+    try {
+      const d = await send("STATUS");
+      const el = $("morniUsbLive");
+      if (el) el.textContent =
+        `RTC ${d.rtc ? "OK" : "NOT FOUND"} · LCD ${d.lcd ? "ON" : "OFF"} · ` +
+        `Time ${d.time} · Timer ${d.timer} · State ${d.state} · ` +
+        `Brush ${d.brush ? "detected" : "not detected"}`;
+    } catch (error) {
+      setStatus(error.message);
+    }
+  }
+
+  async function run(action) {
+    try {
+      await action();
+      setStatus("Command sent to MORNI.", true);
+      await refreshStatus();
+    } catch (error) {
+      setStatus(error.message);
+    }
+  }
+
+  document.addEventListener("click", event => {
+    const t = event.target;
+    if (t.closest("#morniUsbConnect")) run(connect);
+    else if (t.closest("#morniUsbDisconnect")) run(disconnect);
+    else if (t.closest("#morniUsbClock")) run(async () => {
+      await send("CLOCK", Math.floor(Date.now() / 1000), -new Date().getTimezoneOffset() * 60);
+    });
+    else if (t.closest("#morniUsbSendMessage")) run(async () => {
+      const value = $("morniUsbMessage")?.value.trim() || "";
+      if (!value || value.length > 16) throw new Error("Enter a 1-16 character LCD message.");
+      await send("MESSAGE", value);
+    });
+    else if (t.closest("#morniUsbAddReminder")) run(async () => {
+      const when = $("morniUsbWhen")?.value;
+      const message = $("morniUsbReminderText")?.value.trim() || "";
+      const epoch = Math.floor(new Date(when).getTime() / 1000);
+      if (!when || !Number.isFinite(epoch) || epoch <= Math.floor(Date.now()/1000)) {
+        throw new Error("Choose a future reminder time.");
+      }
+      if (!message || message.length > 16) throw new Error("Reminder text must be 1-16 characters.");
+      const result = await send("REMINDER", epoch, message);
+      const slot = Number(result[2]);
+      const items = reminders();
+      items.push({ slot, when: new Date(epoch * 1000).toISOString(), text: message });
+      saveReminders(items);
+      renderReminderList();
+      $("morniUsbReminderText").value = "";
+    });
+    else if (t.dataset.morniCommand) run(() => send("COMMAND", t.dataset.morniCommand));
+    else if (t.dataset.morniDisplay) run(() => send("DISPLAY", t.dataset.morniDisplay));
+    else if (t.dataset.morniRemove !== undefined) run(async () => {
+      const index = Number(t.dataset.morniRemove);
+      const items = reminders();
+      const item = items[index];
+      if (!item) return;
+      await send("CANCEL", item.slot);
+      items.splice(index, 1);
+      saveReminders(items);
+      renderReminderList();
+    });
+  });
+
+  // Keep the existing site timer buttons connected to the physical brush timer too.
+  document.addEventListener("click", event => {
+    const action = event.target.closest("[data-action]")?.dataset.action;
+    const map = {
+      "start-routine": ["start"],
+      "timer-start": ["brush"],
+      "timer-pause": ["pause"],
+      "timer-reset": ["reset"]
+    };
+    if (map[action] && connected) {
+      send("COMMAND", map[action][0]).catch(err => setStatus(err.message));
+    }
+  }, true);
+
+  const observer = new MutationObserver(mount);
+  function start() {
+    observer.observe(document.querySelector("#pageContent") || document.body, {
+      childList: true, subtree: true
+    });
+    mount();
+    if (!("serial" in navigator)) {
+      console.warn("MORNI: Web Serial unavailable; use desktop Chrome/Edge.");
+    }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start, { once: true });
+  } else start();
+
+  window.MORNI_USB_BRIDGE = {
+    connect,
+    disconnect,
+    refreshStatus,
+    get connected() { return connected; }
+  };
+})();
+
