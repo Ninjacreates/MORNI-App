@@ -11014,3 +11014,157 @@ window.MORNI_V4 = {
   };
 })();
 
+
+
+
+
+
+
+/* ============================================================
+   MORNI — CHROME USB PICKER FIX (PASTE AT THE VERY BOTTOM OF app.js)
+   This is an APPEND-ONLY patch. Do not put it in a separate script tag.
+   It opens Chrome's Web Serial chooser directly from the real button click,
+   then makes the existing MORNI bridge consume that exact selected port.
+   ============================================================ */
+(() => {
+  "use strict";
+
+  if (window.__MORNI_CHROME_PICKER_APPEND_FIX__) return;
+  window.__MORNI_CHROME_PICKER_APPEND_FIX__ = true;
+
+  const BUTTON_ID = "morniUsbConnect";
+  let busy = false;
+
+  function show(message, good = false) {
+    const status = document.getElementById("morniUsbStatus");
+    if (status) {
+      status.textContent = message;
+      status.style.color = good ? "#267344" : "#a15c22";
+    }
+  }
+
+  function attach() {
+    const button = document.getElementById(BUTTON_ID);
+    if (!button || button.dataset.morniAppendPickerFix === "1") return;
+    button.dataset.morniAppendPickerFix = "1";
+
+    // Capture at window level so the old app.js button handler cannot call
+    // requestPort a second time or swallow the trusted click.
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+
+      if (busy) return;
+      if (!window.isSecureContext) {
+        show("Open MORNI from its HTTPS GitHub Pages address in desktop Chrome.");
+        return;
+      }
+      if (!navigator.serial || typeof navigator.serial.requestPort !== "function") {
+        show("Chrome Web Serial is unavailable. Use desktop Chrome or Edge.");
+        return;
+      }
+
+      const bridge = window.MORNI_USB_BRIDGE;
+      if (!bridge || typeof bridge.connect !== "function") {
+        show("MORNI USB bridge is not ready. Refresh the page and try again.");
+        return;
+      }
+      if (bridge.connected) {
+        show("MORNI is already connected over USB.", true);
+        return;
+      }
+
+      // CRITICAL: invoke requestPort synchronously during this physical click.
+      // Do not add await, a timer, or a promise callback before this line.
+      let selectedPortPromise;
+      try {
+        selectedPortPromise = navigator.serial.requestPort();
+      } catch (error) {
+        show("Chrome picker error: " + (error?.message || String(error)));
+        return;
+      }
+
+      busy = true;
+      button.disabled = true;
+      button.textContent = "Select MORNI USB device in Chrome…";
+      show("Chrome's USB chooser has been requested. Select the NodeMCU / USB Serial device, then press Connect.");
+
+      // Existing app.js bridge calls requestPort() internally. Temporarily
+      // make that one call return the already user-authorized selection.
+      // connect() reaches its first await synchronously, so it consumes this
+      // promise before the original browser method is restored.
+      const serial = navigator.serial;
+      const originalRequestPort = serial.requestPort;
+      let patched = false;
+      try {
+        serial.requestPort = function () { return selectedPortPromise; };
+        patched = serial.requestPort !== originalRequestPort;
+      } catch (_) {}
+
+      if (!patched) {
+        try {
+          Object.defineProperty(serial, "requestPort", {
+            configurable: true,
+            value: function () { return selectedPortPromise; }
+          });
+          patched = true;
+        } catch (_) {}
+      }
+
+      if (!patched) {
+        busy = false;
+        button.disabled = false;
+        button.textContent = "Connect MORNI by USB";
+        show("Could not hand the selected Chrome port to MORNI. Reload and try again.");
+        return;
+      }
+
+      let connection;
+      try {
+        connection = bridge.connect();
+      } catch (error) {
+        connection = Promise.reject(error);
+      }
+
+      // Restore the native API immediately; bridge.connect already captured
+      // the selected-port promise before reaching its first await.
+      try {
+        delete serial.requestPort;
+      } catch (_) {
+        try { serial.requestPort = originalRequestPort; } catch (_) {}
+      }
+
+      Promise.resolve(connection).then(async () => {
+        let chosenPort = null;
+        try { chosenPort = await selectedPortPromise; } catch (_) {}
+        const info = chosenPort && chosenPort.getInfo ? chosenPort.getInfo() : {};
+        const vid = info.usbVendorId;
+        const pid = info.usbProductId;
+        const usbId = vid
+          ? ` USB VID:PID ${vid.toString(16).padStart(4, "0").toUpperCase()}:${(pid || 0).toString(16).padStart(4, "0").toUpperCase()}.`
+          : "";
+        show("MORNI USB port opened at 115200 baud." + usbId + " Firmware status check completed.", true);
+      }).catch((error) => {
+        show("USB connection failed: " + (error?.message || String(error)));
+      }).finally(() => {
+        busy = false;
+        button.disabled = false;
+        button.textContent = bridge.connected ? "MORNI connected" : "Connect MORNI by USB";
+      });
+    }, true);
+  }
+
+  // Device Studio is rendered dynamically, so attach now and after each render.
+  const observer = new MutationObserver(attach);
+  function start() {
+    attach();
+    if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start, { once: true });
+  } else {
+    start();
+  }
+  console.info("MORNI Chrome USB picker append-fix loaded.");
+})();
