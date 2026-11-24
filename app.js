@@ -22,7 +22,6 @@
 
 
 
-
 /* =========================================================
    MORNI — Smart Morning Ecosystem
    Complete app.js replacement
@@ -1740,6 +1739,42 @@ function routine() {
           ↻ Check connection
         </button>
       </div>
+
+      <section id="morniUsbPanel" style="margin:18px 0;padding:20px;border:1px solid #cbd8c7;border-radius:18px;background:var(--card-bg,#fff);color:var(--text,inherit)">
+        <div style="font-size:11px;letter-spacing:2px;font-weight:800;color:#b77935">MORNI · DIRECT USB LINK</div>
+        <h2 style="margin:6px 0 4px">Connect your physical station</h2>
+        <p style="margin:0 0 12px;opacity:.75">Keep your laptop connected to SNIT. The ESP8266 communicates through its USB cable, not a second Wi-Fi network.</p>
+        <button type="button" id="morniUsbConnect" style="padding:11px 16px;border:0;border-radius:10px;background:#347b45;color:white;font-weight:700">Connect MORNI by USB</button>
+        <button type="button" id="morniUsbDisconnect" style="padding:11px 16px;border:0;border-radius:10px">Disconnect</button>
+        <p id="morniUsbStatus" role="status" style="font-weight:700;margin:12px 0">Not connected. Close Arduino Serial Monitor before connecting.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0">
+          <button type="button" data-morni-command="start">Wake MORNI</button>
+          <button type="button" data-morni-command="paste">Start paste</button>
+          <button type="button" data-morni-command="brush">Start 2-min brush</button>
+          <button type="button" data-morni-command="pause">Pause</button>
+          <button type="button" data-morni-command="resume">Resume</button>
+          <button type="button" data-morni-command="reset">Reset</button>
+          <button type="button" data-morni-display="on">LCD ON</button>
+          <button type="button" data-morni-display="off">LCD OFF</button>
+          <button type="button" id="morniUsbClock">Sync RTC from laptop</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-top:14px">
+          <div style="padding:14px;border:1px solid #ddd;border-radius:12px">
+            <b>LCD message</b>
+            <input id="morniUsbMessage" maxlength="16" placeholder="Max 16 characters" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
+            <button type="button" id="morniUsbSendMessage">Send to LCD</button>
+          </div>
+          <div style="padding:14px;border:1px solid #ddd;border-radius:12px">
+            <b>Schedule an LCD reminder</b>
+            <input id="morniUsbWhen" type="datetime-local" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
+            <input id="morniUsbReminderText" maxlength="16" placeholder="Reminder (max 16 chars)" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
+            <button type="button" id="morniUsbAddReminder">Save reminder to MORNI</button>
+            <small style="display:block;margin-top:7px;opacity:.7">Up to 5 reminders are stored on the ESP8266 and survive a power restart using EEPROM.</small>
+          </div>
+        </div>
+        <div style="margin-top:12px"><b>Saved reminders</b><div id="morniUsbReminderList"></div></div>
+        <div id="morniUsbLive" style="margin-top:12px;padding:10px;border-radius:10px;background:rgba(80,130,80,.08)">Hardware status: waiting for connection</div>
+      </section>
 
       <div class="device-hero-grid">
 
@@ -10620,7 +10655,10 @@ window.MORNI_V4 = {
   function mount() {
     // The original MORNI app can render Device Studio outside #pageContent
     // depending on its navigation/layout version. Search the whole document.
-    if ($("morniUsbPanel")) return;
+    if ($("morniUsbPanel")) {
+      renderReminderList();
+      return;
+    }
 
     const heading = [...document.querySelectorAll("h1,h2")]
       .find(h => /device studio/i.test((h.textContent || "").trim()));
