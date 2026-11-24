@@ -10717,26 +10717,27 @@ window.MORNI_V4 = {
     }, { capture: true });
   }
 
-  function mount() {
-    // The original MORNI app renders Device Studio dynamically. Bind the
-    // button every time the panel is present, including after page rerenders.
-    if ($("morniUsbPanel")) {
-      bindConnectButton();
-      renderReminderList();
-      return;
-    }
-
-    const heading = [...document.querySelectorAll("h1,h2")]
-      .find(h => /device studio/i.test((h.textContent || "").trim()));
-    if (!heading) return;
-
-    const panel = document.createElement("div");
-    panel.innerHTML = panelHTML();
-    const usbPanel = panel.firstElementChild;
-    heading.insertAdjacentElement("afterend", usbPanel);
+ 
+function mount() {
+  if ($("morniUsbPanel")) {
     bindConnectButton();
-    renderReminderList();
+    return;
   }
+
+  const heading = [...document.querySelectorAll("h1,h2")]
+    .find(h => /device studio/i.test((h.textContent || "").trim()));
+
+  if (!heading) return;
+
+  const panel = document.createElement("div");
+  panel.innerHTML = panelHTML();
+
+  const usbPanel = panel.firstElementChild;
+  heading.insertAdjacentElement("afterend", usbPanel);
+
+  bindConnectButton();
+  renderReminderList();
+}
 
   function handleLine(line) {
     if (!line.startsWith("MORNI|")) return; // Ignore ordinary boot/debug messages.
