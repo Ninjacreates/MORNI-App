@@ -9345,7 +9345,7 @@ window.MORNI_V4 = {
     updateMeetings,
     calculateDeparture,
     openDirections,
-    mount: initialise
+    mount: start
 };
 
   console.log("MORNI V4 Connected Intelligence loaded.");
