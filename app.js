@@ -5117,7 +5117,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     save();
     updateConnection();
     await pollDevice();
-    await syncSchoolChecklistToLCD({ silent: true });
+    await syncSchoolChecklistToLCD({ silent: false });
   });
 
   window.addEventListener("morni-usb-disconnected", () => {
