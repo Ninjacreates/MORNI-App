@@ -1094,3 +1094,161 @@ async function syncClock(){
     '&s='+n.getSeconds();
 
   try{
+    const r=await fetch(q);
+    const d=await r.json();
+    if(!r.ok) alert(d.error||'Clock sync failed');
+    else alert('MORNI clock synchronized!');
+    refresh();
+  }catch(e){alert('Clock sync failed');}
+}
+
+async function refresh(){
+  try{
+    const r=await fetch('/status');
+    const d=await r.json();
+
+    document.getElementById('clock').textContent=d.time;
+    document.getElementById('timer').textContent=d.timer;
+    document.getElementById('state').textContent=d.state;
+
+    document.getElementById('wifi').textContent=
+      d.wifiConnected?'SNIT connected: '+d.ip:'MORNI backup Wi-Fi: '+d.ip;
+
+    document.getElementById('hardware').textContent=
+      'RTC: '+(d.rtcWorking?'OK':'NOT DETECTED')+
+      ' | LCD: '+(d.lcdEnabled?'ON':'OFF')+
+      ' | Brush: '+(d.brushDetected?'Detected':'Not detected');
+
+    const er=await fetch('/events');
+    const ed=await er.json();
+    document.getElementById('events').innerHTML=
+      ed.events.map(x=>'<div>'+x.replace(/</g,'&lt;')+'</div>').join('');
+  }catch(e){}
+}
+
+syncClock();
+refresh();
+setInterval(refresh,1000);
+</script>
+</body>
+</html>
+)rawliteral";
+
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "text/html", page);
+}
+
+// =====================================================
+// WIFI - AP ALWAYS STARTS, SNIT IS OPTIONAL
+// =====================================================
+
+void startWiFi() {
+  // The laptop stays on SNIT for internet. ESP8266 uses USB serial only.
+  WiFi.persistent(false);
+  WiFi.mode(WIFI_OFF);
+  Serial.println("MORNI USB mode: ESP8266 Wi-Fi disabled.");
+}
+
+// =====================================================
+// SERVER
+// =====================================================
+
+void setupServer() {
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/status", HTTP_GET, handleStatus);
+  server.on("/events", HTTP_GET, handleEvents);
+  server.on("/command", HTTP_GET, handleCommand);
+  server.on("/message", HTTP_GET, handleMessage);
+  server.on("/display", HTTP_GET, handleDisplay);
+  server.on("/setclock", HTTP_GET, handleSetClock);
+
+  server.on("/greeting", HTTP_GET, []() {
+    showMessage("Good morning!");
+    sendJSON(200, "{\"success\":true}");
+  });
+
+  server.onNotFound([]() {
+    if (server.method() == HTTP_OPTIONS) {
+      server.sendHeader("Access-Control-Allow-Origin", "*");
+      server.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+      server.send(204);
+    } else {
+      sendJSON(404, "{\"error\":\"Not found\"}");
+    }
+  });
+
+  server.begin();
+  Serial.println("MORNI web server started");
+}
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  initReminderStore();
+
+  pinMode(TOUCH_PIN, INPUT);
+  pinMode(IR_PIN, INPUT);
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(100000);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("MORNI");
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
+
+  if (rtc.begin()) {
+    rtcOK = true;
+    Serial.println("DS3231 RTC detected");
+
+    if (rtc.lostPower()) {
+      Serial.println("RTC lost power; browser time sync required");
+    }
+  } else {
+    rtcOK = false;
+    Serial.println("RTC NOT DETECTED");
+  }
+
+  rawTouch = digitalRead(TOUCH_PIN) == TOUCH_LEVEL;
+  stableTouch = rawTouch;
+  lastTouchChange = millis();
+
+  rawIR = digitalRead(IR_PIN) == IR_DETECTED_LEVEL;
+  stableIR = rawIR;
+  brushWasPresent = stableIR;
+  lastIRChange = millis();
+
+  startWiFi();
+  setupServer();
+
+  addEvent("MORNI hardware started");
+
+  showMessage("Good morning!");
+  Serial.println("MORNI|READY|USB");
+}
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop() {
+  handleSerialInput();
+
+  handleTouch();
+  handleIR();
+
+  updateTimer();
+  updateReminders();
+  updateLCD();
+
+  yield();
+}
