@@ -19,9 +19,6 @@
 
 
 
-
-
-
 /* =========================================================
    MORNI — Smart Morning Ecosystem
    Complete app.js replacement
@@ -134,6 +131,15 @@
      --------------------------------------------------------- */
 
   async function request(path, options = {}) {
+    // In LIVE mode MORNI uses the USB serial bridge, never an ESP8266 IP.
+    if (connectionMode === "live") {
+      const usb = window.MORNI_USB_BRIDGE;
+      if (!usb || !usb.connected || typeof usb.request !== "function") {
+        throw new Error("MORNI is set to USB hardware mode. Open Device Studio and click Connect MORNI by USB.");
+      }
+      return usb.request(path, options);
+    }
+
     const url = makeDeviceUrl(path);
     const timeoutMs = Number(
       CFG.requestTimeoutMs || CFG.requestTimeout || 3500
@@ -1031,8 +1037,8 @@
       ip.textContent = demo
         ? "Hardware disconnected"
         : online
-          ? deviceBaseUrl
-          : "Check Wi-Fi connection";
+          ? "USB serial · ESP8266"
+          : "Connect in Device Studio";
     }
 
     const dot = $("#sideDot");
@@ -2195,21 +2201,14 @@ function routine() {
             Connection mode
             <select class="field-input" id="connectionMode">
               <option value="demo" ${demo ? "selected" : ""}>Demo mode</option>
-              <option value="live" ${!demo ? "selected" : ""}>Live hardware</option>
+              <option value="live" ${!demo ? "selected" : ""}>USB hardware (ESP8266)</option>
             </select>
           </label>
 
-          <label class="field-label">
-            ESP8266 address
-            <input class="field-input" id="deviceAddress"
-              type="text"
-              value="${safe(deviceBaseUrl)}"
-              placeholder="http://192.168.0.196">
-          </label>
-
           <p class="body-copy">
-            Your ESP8266 and browser device need a compatible network.
-            Hardware commands remain locked until the station reports readiness.
+            USB hardware mode connects directly to the ESP8266 through your laptop's USB cable.
+            Keep your laptop on SNIT for internet. No ESP8266 IP address or second Wi-Fi network is needed.
+            After saving, open Device Studio and choose Connect MORNI by USB.
           </p>
 
           <button class="btn btn-primary" data-action="save-connection">
@@ -4823,16 +4822,10 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       return;
     }
 
-    if (selectedMode === "live" && !validDeviceAddress(address)) {
-      toast("Enter a valid ESP8266 address, such as http://192.168.0.196");
-      return;
-    }
-
     connectionMode = selectedMode;
 
-    if (address) {
-      deviceBaseUrl = address;
-    }
+    // The USB hardware path does not use an IP address. Keep any old address
+    // stored for compatibility, but never contact it in USB/live mode.
 
     saveConnectionSettings();
 
@@ -4850,17 +4843,14 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       return;
     }
 
-    toast("Live settings saved. Checking ESP8266...");
-    await pollDevice();
-
-    if (state.device.online) {
-      toast(
-        state.device.hardwareReady
-          ? "ESP8266 connected. Firmware reports hardware ready."
-          : "ESP8266 reachable. Hardware is not yet confirmed ready."
-      );
+    if (window.MORNI_USB_BRIDGE?.connected) {
+      toast("USB hardware mode saved. Checking MORNI over USB...");
+      await pollDevice();
+      toast(state.device.online
+        ? "MORNI is connected over USB."
+        : "USB is open, but MORNI did not answer. Check the firmware response.");
     } else {
-      toast("Settings saved, but the ESP8266 could not be reached.");
+      toast("USB hardware mode saved. Open Device Studio and click Connect MORNI by USB.");
     }
   }
 
@@ -5069,6 +5059,31 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
   /* ---------------------------------------------------------
      PUBLIC APP API
      --------------------------------------------------------- */
+
+  window.addEventListener("morni-usb-connected", async () => {
+    connectionMode = "live";
+    saveConnectionSettings();
+    state.device.online = true;
+    state.device.hardwareReady = true;
+    state.device.lastSeen = Date.now();
+    state.device.ip = "USB serial · ESP8266";
+    state.device.mode = "USB connected";
+    state.device.lastError = "";
+    save();
+    updateConnection();
+    await pollDevice();
+  });
+
+  window.addEventListener("morni-usb-disconnected", () => {
+    if (connectionMode !== "live") return;
+    state.device.online = false;
+    state.device.hardwareReady = false;
+    state.device.mode = "disconnected";
+    state.device.ip = "Connect in Device Studio";
+    state.device.lastError = "USB disconnected";
+    save();
+    updateConnection();
+  });
 
   window.showPage = navigate;
   window.navigate = navigate;
@@ -10755,13 +10770,22 @@ window.MORNI_V4 = {
       setStatus("USB opened. Waiting for MORNI to restart…", true);
       readTask = readLoop();
 
-      // Opening the serial port resets most NodeMCU boards.
+      // Opening the serial port resets most NodeMCU boards. Wait for startup,
+      // then prove the firmware responds before declaring the app connected.
       await new Promise(resolve => setTimeout(resolve, 2200));
-      await send("CLOCK", Math.floor(Date.now() / 1000), -new Date().getTimezoneOffset() * 60);
+      const firstStatus = await send("STATUS");
+      if (firstStatus.rtc) {
+        try {
+          await send("CLOCK", Math.floor(Date.now() / 1000), -new Date().getTimezoneOffset() * 60);
+        } catch (clockError) {
+          setStatus("USB connected; RTC sync warning: " + clockError.message);
+        }
+      }
       await refreshStatus();
       clearInterval(statusTimer);
       statusTimer = setInterval(refreshStatus, 2500);
-      setStatus("MORNI connected. Laptop internet remains on SNIT.", true);
+      setStatus("MORNI connected over USB. Laptop internet remains on SNIT.", true);
+      window.dispatchEvent(new Event("morni-usb-connected"));
     } catch (error) {
       try { await disconnect(); } catch {}
       throw error;
@@ -10783,6 +10807,65 @@ window.MORNI_V4 = {
     try { if (port) await port.close(); } catch {}
     port = null;
     setStatus("USB disconnected.");
+    window.dispatchEvent(new Event("morni-usb-disconnected"));
+  }
+
+  function parseDevicePath(path) {
+    const url = new URL(String(path || "/"), "https://morni.invalid");
+    return { pathname: url.pathname.replace(/\/+$/, "") || "/", query: url.searchParams };
+  }
+
+  async function request(path, options = {}) {
+    if (!connected) throw new Error("MORNI USB is not connected. Connect it in Device Studio first.");
+    const { pathname, query } = parseDevicePath(path);
+    const leaf = pathname.split("/").pop();
+
+    if (leaf === "status") {
+      const d = await send("STATUS");
+      return {
+        online: true,
+        hardwareReady: d.lcd === true,
+        mode: "USB connected",
+        time: d.time,
+        timer: d.timer,
+        state: d.state,
+        rtcWorking: d.rtc,
+        lcdEnabled: d.lcd,
+        toothbrushPresent: d.brush,
+        events: []
+      };
+    }
+
+    if (leaf === "events") return { events: [] };
+
+    if (leaf === "timer") {
+      const cmd = (query.get("cmd") || "").toLowerCase();
+      const map = { start: "brush", pause: "pause", resume: "resume", reset: "reset" };
+      if (!map[cmd]) throw new Error("Unsupported MORNI timer command: " + cmd);
+      return await send("COMMAND", map[cmd]);
+    }
+
+    if (leaf === "command") {
+      const cmd = (query.get("cmd") || "").toLowerCase();
+      if (!cmd) throw new Error("Missing MORNI command.");
+      return await send("COMMAND", cmd);
+    }
+
+    if (leaf === "message") {
+      const message = query.get("text") || query.get("message") || "";
+      return await send("MESSAGE", message);
+    }
+
+    if (leaf === "display") {
+      const value = (query.get("state") || query.get("on") || "on").toLowerCase();
+      return await send("DISPLAY", value === "false" || value === "0" ? "off" : value);
+    }
+
+    if (leaf === "setclock" || leaf === "clock") {
+      return await send("CLOCK", Math.floor(Date.now() / 1000), -new Date().getTimezoneOffset() * 60);
+    }
+
+    throw new Error("This website action has no USB firmware mapping: " + pathname);
   }
 
   async function refreshStatus() {
@@ -10808,20 +10891,15 @@ window.MORNI_V4 = {
     }
   }
 
-  // Capture the USB connect click before the app's own navigation handlers.
-  // Web Serial requestPort() must be called directly during a user gesture.
   document.addEventListener("click", event => {
-    const t = event.target instanceof Element ? event.target : event.target?.parentElement;
-    if (!t) return;
-    const connectButton = t.closest("#morniUsbConnect");
-    const disconnectButton = t.closest("#morniUsbDisconnect");
-    if (connectButton || disconnectButton) {
+    const t = event.target;
+    if (t.closest("#morniUsbConnect")) {
       event.preventDefault();
-      event.stopImmediatePropagation();
-      run(connectButton ? connect : disconnect);
+      run(connect);
       return;
     }
-    if (t.closest("#morniUsbClock")) run(async () => {
+    else if (t.closest("#morniUsbDisconnect")) run(disconnect);
+    else if (t.closest("#morniUsbClock")) run(async () => {
       await send("CLOCK", Math.floor(Date.now() / 1000), -new Date().getTimezoneOffset() * 60);
     });
     else if (t.closest("#morniUsbSendMessage")) run(async () => {
@@ -10857,21 +10935,10 @@ window.MORNI_V4 = {
       saveReminders(items);
       renderReminderList();
     });
-  }, true);
+  });
 
-  // Keep the existing site timer buttons connected to the physical brush timer too.
-  document.addEventListener("click", event => {
-    const action = event.target.closest("[data-action]")?.dataset.action;
-    const map = {
-      "start-routine": ["start"],
-      "timer-start": ["brush"],
-      "timer-pause": ["pause"],
-      "timer-reset": ["reset"]
-    };
-    if (map[action] && connected) {
-      send("COMMAND", map[action][0]).catch(err => setStatus(err.message));
-    }
-  }, true);
+  // The original app owns its timer click handlers. They now reach this
+  // bridge through request(), avoiding duplicate serial commands.
 
   const observer = new MutationObserver(mount);
   function start() {
@@ -10893,11 +10960,9 @@ window.MORNI_V4 = {
     connect,
     disconnect,
     refreshStatus,
+    request,
+    send,
     get connected() { return connected; }
   };
 })();
-
-
-
-
 
