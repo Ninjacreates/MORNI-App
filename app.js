@@ -22,6 +22,10 @@
 
 
 
+
+
+
+
 /* =========================================================
    MORNI — Smart Morning Ecosystem
    Complete app.js replacement
@@ -2383,7 +2387,8 @@ function routine() {
       ["rewards", "✧", "Rewards shop"],
       ["impact", "◎", "Readiness lab"],
       ["showcase", "▶", "Judge tour"],
-      ["focus", "◉", "Focus space"]
+      ["focus", "◉", "Focus space"],
+      ["device", "⌁", "Device studio"]
     ];
     return `<nav class="morni-feature-nav" aria-label="MORNI experience">
       <span class="morni-nav-label">EXPLORE MORNI</span>
