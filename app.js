@@ -2421,7 +2421,8 @@ function routine() {
     reflection: { date: today(), energy: "steady", note: "" },
     resource: { mlPerPump: Number(CFG.refill?.handwashPerUse || 2), refillReminder: 20 },
     showcase: { step: 0, completed: [] },
-    focus: { running: false, remaining: 300, endsAt: 0, sessions: 0 }
+    focus: { running: false, remaining: 300, endsAt: 0, sessions: 0 },
+    smart: { alarms: [], soundEnabled: true }
   });
 
   let extra = Object.assign(extraDefaults(), read(EXTRA_STORE, {}));
@@ -2436,6 +2437,9 @@ function routine() {
   if (!Array.isArray(extra.rewards.owned)) extra.rewards.owned = ["sunrise"];
   if (!Array.isArray(extra.rewards.transactions)) extra.rewards.transactions = [];
   if (!Array.isArray(extra.showcase.completed)) extra.showcase.completed = [];
+  if (!extra.smart || typeof extra.smart !== "object") extra.smart = { alarms: [], soundEnabled: true };
+  if (!Array.isArray(extra.smart.alarms)) extra.smart.alarms = [];
+  extra.smart.soundEnabled = extra.smart.soundEnabled !== false;
   if (extra.water.date !== today()) {
     extra.water.count = 0;
     extra.water.date = today();
@@ -2457,6 +2461,7 @@ function routine() {
   let handwashLoop = null;
   let focusLoop = null;
   let featureToastLoop = null;
+  let smartAlarmLoop = null;
 
   function saveExtra() {
     write(EXTRA_STORE, extra);
@@ -2498,6 +2503,7 @@ function routine() {
       ["home", "⌂", "Home"],
       ["lab", "⌘", "Command centre"],
       ["handwash", "◌", "Handwash lab"],
+      ["smart", "✦", "Smart routine"],
       ["planner", "◷", "Morning planner"],
       ["rewards", "✧", "Rewards shop"],
       ["impact", "◎", "Readiness lab"],
@@ -2858,6 +2864,193 @@ function routine() {
     </div>`;
   }
 
+
+  /* SMART ROUTINE ASSISTANT + LOCAL ALARMS */
+  function parseRoutineText(input) {
+    const text = String(input || "").trim();
+    if (!text) return [];
+    const pattern = /\b(\d{1,2}):([0-5]\d)\s*(a\.?m\.?|p\.?m\.?)?|\bat\s+(\d{1,2})(?![:\d])\s*(a\.?m\.?|p\.?m\.?)?\b/gi;
+    const matches = [...text.matchAll(pattern)];
+    const parsed = [];
+    let cursor = 0;
+    for (const match of matches) {
+      let hour = Number(match[1] || match[4]);
+      const minute = Number(match[2] || 0);
+      const meridiem = String(match[3] || match[5] || "").toLowerCase().replace(/\./g, "");
+      if (!Number.isFinite(hour) || hour < 0 || hour > 23) continue;
+      if (meridiem === "pm" && hour < 12) hour += 12;
+      if (meridiem === "am" && hour === 12) hour = 0;
+      if (hour > 23) continue;
+      let label = text.slice(cursor, match.index)
+        .replace(/^\s*(?:(?:and|then|also|i|we|usually|every day|daily)\b[\s,:-]*)+/i, "")
+        .replace(/[\s,:;.!-]+$/g, "")
+        .replace(/\b(?:at|around|by)\s*$/i, "")
+        .replace(/^[\s,:;.!-]+/g, "").trim();
+      label = label.replace(/^["']|["']$/g, "").trim();
+      if (!label) label = `Routine reminder ${parsed.length + 1}`;
+      label = label.charAt(0).toUpperCase() + label.slice(1);
+      parsed.push({ label: label.slice(0, 70), time: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}` });
+      cursor = match.index + match[0].length;
+    }
+    const seen = new Set();
+    return parsed.filter(item => {
+      const key = item.time + "|" + item.label.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).sort((a, b) => a.time.localeCompare(b.time));
+  }
+
+  function addSmartAlarms(items, repeat) {
+    const createdAt = Date.now();
+    const additions = items.map((item, index) => ({
+      id: `smart-${createdAt}-${index}`, label: item.label, time: item.time,
+      repeat: repeat || "daily", enabled: true, lastFired: ""
+    }));
+    extra.smart.alarms = [...extra.smart.alarms, ...additions].slice(-60);
+    saveExtra();
+    return additions.length;
+  }
+
+  function saveSmartRoutine() {
+    const input = $("#smartRoutineText")?.value || "";
+    const parsed = parseRoutineText(input);
+    if (!parsed.length) {
+      featureToast("I couldn't find any times. Try: Wake up at 6:30 AM, breakfast at 7 AM.");
+      return;
+    }
+    const repeat = /\b(weekdays?|school days?)\b/i.test(input) ? "weekdays" : "daily";
+    const count = addSmartAlarms(parsed, repeat);
+    render();
+    featureToast(`MORNI created ${count} ${count === 1 ? "alarm" : "alarms"} from your routine.`);
+  }
+
+  function addManualSmartAlarm() {
+    const label = ($("#smartAlarmLabel")?.value || "").trim();
+    const time = $("#smartAlarmTime")?.value || "";
+    const repeat = $("#smartAlarmRepeat")?.value || "daily";
+    if (!label || !/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) {
+      featureToast("Enter an alarm name and a valid time.");
+      return;
+    }
+    addSmartAlarms([{ label, time }], repeat);
+    render();
+    featureToast("Alarm added to MORNI.");
+  }
+
+  async function enableSmartNotifications() {
+    if (!("Notification" in window)) {
+      featureToast("This browser does not support desktop notifications.");
+      return;
+    }
+    try {
+      const permission = await Notification.requestPermission();
+      featureToast(permission === "granted"
+        ? "Notifications enabled. MORNI can alert you while this page is open."
+        : "Notifications were not enabled. In-app alarms still work while MORNI is open.");
+    } catch (error) {
+      featureToast("Notification permission could not be requested in this browser.");
+    }
+  }
+
+  function playSmartAlarmSound() {
+    if (!extra.smart.soundEnabled) return;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    try {
+      const context = new AudioContextClass();
+      const start = context.currentTime;
+      [0, 0.42, 0.84, 1.26].forEach((offset, index) => {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = "sine";
+        oscillator.frequency.value = index % 2 ? 740 : 880;
+        gain.gain.setValueAtTime(0.0001, start + offset);
+        gain.gain.exponentialRampToValueAtTime(0.12, start + offset + 0.025);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + 0.22);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(start + offset);
+        oscillator.stop(start + offset + 0.24);
+      });
+      window.setTimeout(() => context.close().catch(() => {}), 2200);
+    } catch (error) {
+      console.warn("MORNI alarm sound could not start:", error);
+    }
+  }
+
+  function smartAlarmTick() {
+    if (!extra.smart.alarms.length) return;
+    const now = new Date();
+    const clock = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+    const day = now.getDay();
+    const dateKey = today();
+    let changed = false;
+    for (const alarm of extra.smart.alarms) {
+      if (!alarm.enabled || alarm.time !== clock || alarm.lastFired === dateKey) continue;
+      if (alarm.repeat === "weekdays" && (day === 0 || day === 6)) continue;
+      if (alarm.repeat === "weekends" && day !== 0 && day !== 6) continue;
+      alarm.lastFired = dateKey;
+      changed = true;
+      featureToast(`⏰ ${alarm.label}`);
+      playSmartAlarmSound();
+      if ("Notification" in window && Notification.permission === "granted") {
+        try {
+          const notification = new Notification("MORNI reminder", { body: alarm.label, icon: "./logo.svg", tag: `morni-${alarm.id}-${dateKey}` });
+          notification.onclick = () => { window.focus(); notification.close(); };
+        } catch (error) {
+          console.warn("MORNI notification could not be shown:", error);
+        }
+      }
+      if (alarm.repeat === "once") alarm.enabled = false;
+    }
+    if (changed) saveExtra();
+  }
+
+  function smartRoutinePage() {
+    const alarms = [...extra.smart.alarms].sort((a, b) => a.time.localeCompare(b.time));
+    const permission = "Notification" in window ? Notification.permission : "unsupported";
+    const permissionLabel = permission === "granted" ? "Notifications enabled" :
+      permission === "denied" ? "Notifications blocked in browser settings" :
+      permission === "unsupported" ? "Notifications unavailable in this browser" : "Notifications not enabled";
+    return `<div class="page-enter morni-feature-page">
+      <div class="morni-page-heading"><div><span class="morni-kicker">MORNI SMART ROUTINE ASSISTANT</span><h1>Tell MORNI.<br><em>We'll organise it.</em></h1><p>Describe your day naturally. MORNI finds the times, builds a reminder schedule and keeps it saved in this browser.</p></div><span class="morni-live-label">SMART SCHEDULING</span></div>
+      <section class="morni-glass-panel" style="margin-bottom:16px">
+        <div class="morni-panel-head"><div><span class="morni-kicker">NATURAL-LANGUAGE ROUTINE BUILDER</span><h3>Describe your routine</h3></div><span>✦</span></div>
+        <p class="body-copy">Example: “I wake up at 6:30 AM, brush my teeth at 6:40 AM, have breakfast at 7 AM, pack my bag at 7:20 AM and leave at 7:45 AM.” You can write it in one sentence or put each activity on a new line.</p>
+        <textarea id="smartRoutineText" rows="5" maxlength="1800" placeholder="Tell MORNI what your normal day looks like…"></textarea>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px">
+          <button class="btn btn-primary" data-extra-action="smart-build">Create my routine + alarms ↗</button>
+          <span class="morni-disclaimer">“Weekdays” or “school days” creates weekday alarms. Otherwise alarms repeat daily.</span>
+        </div>
+      </section>
+      <div class="morni-section-heading"><div><span class="morni-kicker">YOUR REMINDER SYSTEM</span><h2>Alarms and reminders</h2></div><span class="morni-date-stamp">${alarms.filter(item=>item.enabled).length} active</span></div>
+      <section class="morni-glass-panel" style="margin-bottom:16px">
+        <div class="morni-panel-head"><div><span class="morni-kicker">ADD ONE ALARM</span><h3>Quick reminder</h3></div><span>◷</span></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;align-items:end">
+          <label class="morni-field">Reminder name<input id="smartAlarmLabel" maxlength="70" placeholder="e.g. Start homework"></label>
+          <label class="morni-field">Time<input id="smartAlarmTime" type="time"></label>
+          <label class="morni-field">Repeat<select id="smartAlarmRepeat"><option value="daily">Every day</option><option value="weekdays">Weekdays</option><option value="weekends">Weekends</option><option value="once">Once</option></select></label>
+          <button class="btn btn-primary" data-extra-action="smart-add-alarm">Add alarm</button>
+        </div>
+      </section>
+      <section class="morni-glass-panel" style="margin-bottom:16px">
+        <div class="morni-panel-head"><div><span class="morni-kicker">UPCOMING SCHEDULE</span><h3>Your alarms</h3></div><span>⏰</span></div>
+        ${alarms.length ? alarms.map(alarm=>`<div class="morni-history-row" style="gap:12px;align-items:center"><span style="font-size:20px">${alarm.enabled ? "⏰" : "◌"}</span><div style="min-width:0;flex:1"><b>${safe(alarm.label)}</b><small>${safe(alarm.time)} · ${alarm.repeat === "weekdays" ? "Weekdays" : alarm.repeat === "weekends" ? "Weekends" : alarm.repeat === "once" ? "Once" : "Daily"} · ${alarm.enabled ? "Active" : "Paused"}</small></div><button class="btn btn-soft" data-extra-action="smart-toggle-alarm" data-extra-id="${safe(alarm.id)}">${alarm.enabled ? "Pause" : "Enable"}</button><button class="btn btn-soft" data-extra-action="smart-delete-alarm" data-extra-id="${safe(alarm.id)}" aria-label="Delete reminder">×</button></div>`).join("") : `<div class="morni-empty-state"><span>◷</span><b>No alarms yet.</b><small>Describe your routine above or add a reminder manually.</small></div>`}
+      </section>
+      <section class="morni-glass-panel">
+        <div class="morni-panel-head"><div><span class="morni-kicker">ALERT PREFERENCES</span><h3>How MORNI alerts you</h3></div><span>🔔</span></div>
+        <p class="body-copy">${safe(permissionLabel)}. Alarms are checked while MORNI is open. Browser notifications require permission.</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <button class="btn btn-primary" data-extra-action="smart-notifications">Enable browser notifications</button>
+          <button class="btn btn-soft" data-extra-action="smart-sound">${extra.smart.soundEnabled ? "Turn sound off" : "Turn sound on"}</button>
+          <button class="btn btn-soft" data-extra-action="smart-test">Test alarm sound</button>
+        </div>
+        <p class="morni-disclaimer" style="margin-top:12px">Important: because MORNI is a browser app with no always-on server, alarms cannot ring after the browser is fully closed or the device is off. Keep MORNI open for reliable in-app alerts. On phones, notification behaviour also depends on browser and operating-system permissions.</p>
+      </section>
+    </div>`;
+  }
+
   function plannerPage() {
     const summary = plannerSummary();
     let cursor = parseClock(extra.plan.wake) || 0;
@@ -3006,6 +3199,13 @@ function routine() {
     else if(action==="export-data") exportMorniData();
     else if(action==="focus-toggle") toggleFocus();
     else if(action==="focus-reset") { clearInterval(focusLoop); extra.focus={running:false,remaining:300,endsAt:0,sessions:extra.focus.sessions||0}; saveExtra(); render(); }
+    else if(action==="smart-build") saveSmartRoutine();
+    else if(action==="smart-add-alarm") addManualSmartAlarm();
+    else if(action==="smart-toggle-alarm") { const alarm=extra.smart.alarms.find(item=>item.id===id); if(alarm){alarm.enabled=!alarm.enabled;saveExtra();render();} }
+    else if(action==="smart-delete-alarm") { extra.smart.alarms=extra.smart.alarms.filter(item=>item.id!==id);saveExtra();render();featureToast("Reminder deleted."); }
+    else if(action==="smart-notifications") enableSmartNotifications();
+    else if(action==="smart-sound") { extra.smart.soundEnabled=!extra.smart.soundEnabled;saveExtra();render(); }
+    else if(action==="smart-test") { playSmartAlarmSound();featureToast("MORNI alarm sound test."); }
   }
 
   function injectUltimateStyles() {
@@ -4832,6 +5032,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     lab,
     handwash: handwashPage,
     planner: plannerPage,
+    smart: smartRoutinePage,
     rewards: rewardsPage,
     impact: impactPage,
     showcase: showcasePage,
@@ -5052,6 +5253,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
         if (confirm("Reset all MORNI data saved in this browser?")) {
           localStorage.removeItem(STORE);
           localStorage.removeItem(XP_STORE);
+          localStorage.removeItem(EXTRA_STORE);
 
           state = defaultState();
 
@@ -5106,6 +5308,9 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
 
     render();
 
+    smartAlarmTick();
+    smartAlarmLoop = setInterval(smartAlarmTick, 1000);
+
     if (state.timer.running) {
       startTimerLoop();
     }
@@ -5139,6 +5344,7 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
       clearInterval(pollLoop);
       clearInterval(handwashLoop);
       clearInterval(focusLoop);
+      clearInterval(smartAlarmLoop);
       clearTimeout(toastLoop);
       clearTimeout(featureToastLoop);
     });

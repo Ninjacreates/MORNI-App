@@ -443,3 +443,42 @@ body[data-theme="dark"] .command-row:disabled {
     transform: none;
   }
 }
+
+
+/* MORNI smart routine assistant */
+#pageContent #smartRoutineText{
+  display:block;
+  width:100%;
+  min-height:132px;
+  padding:14px 15px;
+  border:1px solid var(--line);
+  border-radius:14px;
+  background:var(--surface);
+  color:var(--text);
+  font:500 13px/1.65 "DM Sans",sans-serif;
+  resize:vertical;
+  outline:none;
+}
+#pageContent #smartRoutineText::placeholder{color:var(--muted);opacity:.8}
+#pageContent #smartRoutineText:focus,
+#pageContent #smartAlarmLabel:focus,
+#pageContent #smartAlarmTime:focus,
+#pageContent #smartAlarmRepeat:focus{
+  outline:3px solid #8fcf9b;
+  outline-offset:2px;
+}
+#pageContent .morni-field select{
+  border:1px solid var(--line);
+  border-radius:11px;
+  padding:11px 12px;
+  background:var(--surface);
+  color:var(--text);
+  font:inherit;
+  min-height:42px;
+  width:100%;
+}
+#pageContent .morni-history-row button{flex-shrink:0}
+@media(max-width:560px){
+  #pageContent .morni-history-row{flex-wrap:wrap}
+  #pageContent .morni-history-row>div{flex-basis:calc(100% - 40px)}
+}
