@@ -1829,6 +1829,7 @@ function routine() {
         <div style="font-size:11px;letter-spacing:2px;font-weight:800;color:#b77935">MORNI · DIRECT USB LINK</div>
         <h2 style="margin:6px 0 4px">Connect your physical station</h2>
         <p style="margin:0 0 12px;opacity:.75">Keep your laptop connected to SNIT. The ESP8266 communicates through its USB cable, not a second Wi-Fi network.</p>
+        <p class="morni-usb-platform-note" role="note">Mobile browsers can use MORNI’s app features. Direct USB control of the ESP8266 requires a compatible desktop browser (Chrome or Edge) and a USB connection.</p>
         <button type="button" id="morniUsbConnect" style="padding:11px 16px;border:0;border-radius:10px;background:#347b45;color:white;font-weight:700">Connect MORNI by USB</button>
         <button type="button" id="morniUsbDisconnect" style="padding:11px 16px;border:0;border-radius:10px">Disconnect</button>
         <p id="morniUsbStatus" role="status" style="font-weight:700;margin:12px 0">Not connected. Close Arduino Serial Monitor before connecting.</p>
@@ -5709,6 +5710,178 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
         transition-duration: .01ms !important;
       }
     }
+
+    /* MORNI mobile completion: responsive layouts for every feature family. */
+    @media (max-width: 760px) {
+      .feature-card-grid, .morni-lower-grid, .morni-command-hero,
+      .planner-top-grid, .planner-settings, .planner-timeline,
+      .showcase-layout, .readiness-signal-grid, .resource-panel,
+      .mi3-grid, .v4-grid, .mi4-grid, .m4-grid, .ms-grid,
+      .feature-grid, .handwash-workspace, .morni-score-row {
+        display: grid !important;
+        grid-template-columns: minmax(0, 1fr) !important;
+        width: 100%;
+        min-width: 0;
+        gap: 12px;
+      }
+
+      .feature-card, .mi3-card, .v4-card, .mi4-card, .m4-card,
+      .ms-card, .morni-glass-panel, .morni-command-hero,
+      .planner-settings, .planner-top-grid > *, .showcase-layout > *,
+      .handwash-workspace > *, .readiness-hero-card, .focus-card {
+        min-width: 0;
+        max-width: 100%;
+        width: 100%;
+      }
+
+      .feature-card, .mi3-card, .v4-card, .mi4-card, .m4-card,
+      .ms-card, .morni-glass-panel {
+        overflow-wrap: anywhere;
+      }
+
+      .feature-card-grid, .morni-feature-nav, .morni-hero-tags,
+      .morni-date-stamp, .morni-score-row, .water-actions,
+      .handwash-controls, .showcase-controls, .focus-controls,
+      .planner-top-grid, .planner-task-row, .morni-command-hero,
+      .ms-button, .mi3-button-row, .mi4-button-row, .m4-actions {
+        flex-wrap: wrap;
+      }
+
+      .planner-task-row, .planner-settings .setting-row,
+      .morni-history-row, .readiness-line, .resource-detail-top,
+      .showcase-chapter, .handwash-step-row {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+
+      #morniUsbPanel {
+        width: 100%;
+        max-width: 100%;
+        padding: 14px !important;
+        overflow: hidden;
+      }
+
+      #morniUsbPanel > div[style*="grid-template-columns"] {
+        grid-template-columns: minmax(0, 1fr) !important;
+      }
+
+      #morniUsbPanel button,
+      #morniUsbPanel input,
+      #morniUsbPanel select,
+      #morniUsbPanel textarea {
+        min-width: 0;
+        max-width: 100%;
+      }
+
+      .morni-usb-platform-note {
+        padding: 10px 12px;
+        margin: 10px 0 14px !important;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--surface-2);
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .morni-feature-nav {
+        display: flex;
+        overflow-x: auto;
+        max-width: 100%;
+        padding-bottom: 5px;
+        -webkit-overflow-scrolling: touch;
+      }
+
+      .morni-feature-nav > * {
+        flex: 0 0 auto;
+      }
+
+      .week-chart, .activity-calendar {
+        gap: 5px;
+        overflow: hidden;
+      }
+
+      .calendar-day {
+        min-width: 0;
+      }
+
+      .mobile-nav {
+        padding-bottom: calc(8px + env(safe-area-inset-bottom));
+      }
+
+      .page-content {
+        padding-bottom: calc(112px + env(safe-area-inset-bottom)) !important;
+      }
+
+      button, [role="button"], input, select, textarea {
+        touch-action: manipulation;
+      }
+
+      button {
+        min-height: 44px;
+      }
+
+      input, select, textarea {
+        font-size: 16px !important;
+      }
+
+      table, .table-wrap, .data-table, .planner-table {
+        max-width: 100%;
+      }
+
+      .table-wrap, .data-table-wrap {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+    }
+
+    @media (max-width: 430px) {
+      .top-actions .mode-pill {
+        max-width: 92px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .hero-actions .btn, .timer-controls .btn,
+      .handwash-controls button, .focus-controls button,
+      .showcase-controls button, .m4-actions button,
+      .mi3-button-row button, .mi4-button-row button {
+        flex: 1 1 100%;
+        width: 100%;
+      }
+
+      .feature-card-grid, .morni-lower-grid,
+      .mission-grid, .achievement-grid,
+      .insight-metrics, .mi3-grid, .v4-grid,
+      .mi4-grid, .m4-grid, .ms-grid {
+        grid-template-columns: minmax(0, 1fr) !important;
+      }
+
+      .level-showcase, .achievement, .mission-card,
+      .component-row, .connection-visual {
+        min-width: 0;
+        flex-wrap: wrap;
+      }
+
+      .metric-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+      }
+    }
+
+    @media (max-width: 760px) and (orientation: landscape) {
+      .mobile-nav {
+        min-height: 48px;
+        padding-top: 3px;
+        padding-bottom: calc(3px + env(safe-area-inset-bottom));
+      }
+      .mobile-nav button {
+        min-height: 40px;
+      }
+      .page-content {
+        padding-bottom: calc(90px + env(safe-area-inset-bottom)) !important;
+      }
+    }
+
   `;
 
   const style = document.createElement("style");
@@ -10757,6 +10930,7 @@ window.MORNI_V4 = {
         <div style="font-size:11px;letter-spacing:2px;font-weight:800;color:#b77935">MORNI · DIRECT USB LINK</div>
         <h2 style="margin:6px 0 4px">Connect your physical station</h2>
         <p style="margin:0 0 12px;opacity:.75">Keep your laptop connected to SNIT. The ESP8266 communicates through its USB cable, not a second Wi-Fi network.</p>
+        <p class="morni-usb-platform-note" role="note">Mobile browsers can use MORNI’s app features. Direct USB control of the ESP8266 requires a compatible desktop browser (Chrome or Edge) and a USB connection.</p>
         <button type="button" id="morniUsbConnect" style="padding:11px 16px;border:0;border-radius:10px;background:#347b45;color:white;font-weight:700">Connect MORNI by USB</button>
         <button type="button" id="morniUsbDisconnect" style="padding:11px 16px;border:0;border-radius:10px">Disconnect</button>
         <p id="morniUsbStatus" role="status" style="font-weight:700;margin:12px 0">Not connected. Close Arduino Serial Monitor before connecting.</p>
