@@ -2869,7 +2869,7 @@ function routine() {
   function parseRoutineText(input) {
     const text = String(input || "").trim();
     if (!text) return [];
-    const pattern = /\b(\d{1,2}):([0-5]\d)\s*(a\.?m\.?|p\.?m\.?)?|\bat\s+(\d{1,2})\s*(a\.?m\.?|p\.?m\.?)?\b/gi;
+    const pattern = /\b(\d{1,2}):([0-5]\d)\s*(a\.?m\.?|p\.?m\.?)?|\bat\s+(\d{1,2})(?![:\d])\s*(a\.?m\.?|p\.?m\.?)?\b/gi;
     const matches = [...text.matchAll(pattern)];
     const parsed = [];
     let cursor = 0;
@@ -2884,7 +2884,8 @@ function routine() {
       let label = text.slice(cursor, match.index)
         .replace(/^\s*(?:(?:and|then|also|i|we|usually|every day|daily)\b[\s,:-]*)+/i, "")
         .replace(/[\s,:;.!-]+$/g, "")
-        .replace(/\b(?:at|around|by)\s*$/i, "").trim();
+        .replace(/\b(?:at|around|by)\s*$/i, "")
+        .replace(/^[\s,:;.!-]+/g, "").trim();
       label = label.replace(/^["']|["']$/g, "").trim();
       if (!label) label = `Routine reminder ${parsed.length + 1}`;
       label = label.charAt(0).toUpperCase() + label.slice(1);
