@@ -6360,17 +6360,6 @@ body[data-theme="dark"] #pageContent textarea{background:#17251c;color:#eef2e9;b
     `;
 
     updateLocationStatus();
-
-    // The Connected Services page is rebuilt when the user navigates away
-    // and returns. Keep the OAuth token in memory (never localStorage), then
-    // restore the Gmail status and inbox into the newly-created page.
-    if (gmailToken) {
-      const gmailStatus = document.getElementById("ms-gmail-status");
-      if (gmailStatus) {
-        gmailStatus.textContent = "Gmail connected. Restoring your inbox...";
-      }
-      loadInbox(true);
-    }
   }
 
   function renderMeetings() {
