@@ -803,6 +803,10 @@
     }, 200);
   }
 
+  let schoolSyncInFlight = null;
+  let schoolSyncRequested = false;
+  let schoolSyncFeedback = false;
+
   async function syncSchoolChecklistToLCD(options = {}) {
     const bridge = window.MORNI_USB_BRIDGE;
     if (!bridge?.connected || typeof bridge.send !== "function") {
@@ -810,26 +814,63 @@
       return false;
     }
 
-    // Keep LCD labels short enough for a 16-character display line.
-    const items = [
-      ["Uniform", "uniform"],
-      ["Bag", "bag"],
-      ["Water", "bottle"],
-      ["Homework", "homework"]
-    ];
+    schoolSyncRequested = true;
+    schoolSyncFeedback = schoolSyncFeedback || !options.silent;
 
-    try {
-      for (let i = 0; i < items.length; i++) {
-        const [label, key] = items[i];
-        await bridge.send("SCHOOL", i, state.checklist[key] ? 1 : 0, label);
+    // Keep only one checklist transfer active at a time. If the user changes
+    // several boxes quickly, send the latest complete snapshot after the
+    // current transfer rather than interleaving serial commands.
+    if (schoolSyncInFlight) return schoolSyncInFlight;
+
+    schoolSyncInFlight = (async () => {
+      let success = true;
+
+      try {
+        while (schoolSyncRequested) {
+          schoolSyncRequested = false;
+
+          const currentBridge = window.MORNI_USB_BRIDGE;
+          if (!currentBridge?.connected || typeof currentBridge.send !== "function") {
+            throw new Error("MORNI USB disconnected before checklist sync finished.");
+          }
+
+          const items = [
+            ["Uniform", "uniform"],
+            ["Bag", "bag"],
+            ["Water", "bottle"],
+            ["Homework", "homework"]
+          ];
+
+          const snapshot = items.map(([label, key]) => ({
+            label,
+            done: Boolean(state.checklist[key])
+          }));
+
+          for (let i = 0; i < snapshot.length; i++) {
+            if (!currentBridge.connected) {
+              throw new Error("MORNI USB disconnected during checklist sync.");
+            }
+            const item = snapshot[i];
+            await currentBridge.send("SCHOOL", i, item.done ? 1 : 0, item.label);
+          }
+        }
+
+        if (schoolSyncFeedback) toast("School checklist synced to MORNI's LCD.");
+      } catch (error) {
+        success = false;
+        console.warn("MORNI school checklist LCD sync failed:", error);
+        if (schoolSyncFeedback) {
+          toast("LCD sync failed. Check USB and upload the updated MORNI firmware.");
+        }
+      } finally {
+        schoolSyncFeedback = false;
+        schoolSyncInFlight = null;
       }
-      if (!options.silent) toast("School checklist synced to MORNI's LCD.");
-      return true;
-    } catch (error) {
-      console.warn("MORNI school checklist LCD sync failed:", error);
-      if (!options.silent) toast("LCD sync failed. Upload the updated MORNI firmware first.");
-      return false;
-    }
+
+      return success;
+    })();
+
+    return schoolSyncInFlight;
   }
 
   function toggleChecklist(id) {
@@ -1816,7 +1857,7 @@ function routine() {
             <small style="display:block;margin-top:7px;opacity:.7">Up to 5 meeting or task reminders are stored on the ESP8266. The LCD displays each one when it is due, even after the laptop is disconnected.</small>
           </div>
         </div>
-        <div style="margin-top:12px"><b>Saved reminders</b><div id="morniUsbReminderList"></div></div>
+        <div style="margin-top:12px"><b>Upcoming reminders</b><div id="morniUsbReminderList"></div></div>
         <div id="morniUsbLive" style="margin-top:12px;padding:10px;border-radius:10px;background:rgba(80,130,80,.08)">Hardware status: waiting for connection</div>
       </section>
 
@@ -1865,8 +1906,8 @@ function routine() {
             <div class="component-row">
               <span class="component-glyph">⌁</span>
               <div>
-                <b>Handwash detection + dual-servo pump</b>
-                <small>Ultrasonic sensing and coordinated dispensing</small>
+                <b>ESP8266 NodeMCU microcontroller</b>
+                <small>Runs MORNI and links the website to the physical station over USB</small>
               </div>
               <em class="pending-pill">Awaiting hardware</em>
             </div>
@@ -1892,8 +1933,8 @@ function routine() {
             <div class="component-row">
               <span class="component-glyph">▤</span>
               <div>
-                <b>LCD + battery-backed RTC</b>
-                <small>Clock, countdown and routine messages</small>
+                <b>16×2 LCD + DS3231 RTC</b>
+                <small>Live clock, scrolling demo news, countdowns and scheduled reminders</small>
               </div>
               <em class="pending-pill">Awaiting hardware</em>
             </div>
@@ -1901,8 +1942,8 @@ function routine() {
 
           ${card("Hardware integration notes", `
             <p class="body-copy">
-              An online ESP8266 confirms that its web server is reachable.
-              It does not prove that sensors, the LCD or servos are connected.
+              A successful USB connection confirms serial communication with the ESP8266.
+              The firmware separately reports whether the RTC and LCD are available.
             </p>
 
             <div class="notice-box">
@@ -1925,20 +1966,20 @@ function routine() {
 
             <button class="command-row" disabled>
               <span>🧼</span>
-              <b>Test handwash pump</b>
-              <small>Locked pending verified dispenser integration</small>
+              <b>School checklist LCD sync</b>
+              <small>Send Uniform, Bag, Water and Homework status to the LCD</small>
             </button>
 
             <button class="command-row" disabled>
               <span>✳</span>
-              <b>Test toothbrush detection</b>
-              <small>Sensor status is read from firmware events</small>
+              <b>Meeting and task reminders</b>
+              <small>Schedule up to five reminders for the ESP8266 LCD</small>
             </button>
 
             <button class="command-row" disabled>
               <span>◉</span>
-              <b>Activate START routine</b>
-              <small>Physical touch sensor</small>
+              <b>Touch-activated morning routine</b>
+              <small>The physical touch sensor starts MORNI's morning sequence</small>
             </button>
           `)}
 
@@ -10650,12 +10691,41 @@ window.MORNI_V4 = {
     "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
   })[c]);
 
-  function reminders() {
-    try { return JSON.parse(localStorage.getItem(STORE) || "[]"); }
-    catch { return []; }
+  const MAX_REMINDERS = 5;
+
+  function readReminderStore() {
+    try {
+      const value = JSON.parse(localStorage.getItem(STORE) || "[]");
+      return Array.isArray(value) ? value : [];
+    } catch {
+      return [];
+    }
   }
+
+  function reminders() {
+    const stored = readReminderStore();
+    const now = Date.now();
+    const active = stored.filter(item => {
+      const slot = Number(item?.slot);
+      const when = Date.parse(item?.when);
+      return Number.isInteger(slot) && slot >= 0 && slot < MAX_REMINDERS &&
+        typeof item?.text === "string" && item.text.trim().length > 0 &&
+        Number.isFinite(when) && when > now;
+    }).sort((a, b) => Date.parse(a.when) - Date.parse(b.when));
+
+    if (active.length !== stored.length) {
+      try { localStorage.setItem(STORE, JSON.stringify(active)); }
+      catch (error) { console.warn("MORNI could not refresh its saved reminder list:", error); }
+    }
+    return active;
+  }
+
   function saveReminders(items) {
-    localStorage.setItem(STORE, JSON.stringify(items));
+    try {
+      localStorage.setItem(STORE, JSON.stringify(items));
+    } catch (error) {
+      throw new Error("The reminder was sent to MORNI, but this browser could not save its reminder list.");
+    }
   }
   function setStatus(message, good = false) {
     const el = $("morniUsbStatus");
@@ -10667,12 +10737,18 @@ window.MORNI_V4 = {
   function renderReminderList() {
     const el = $("morniUsbReminderList");
     if (!el) return;
+
     const items = reminders();
-    el.innerHTML = items.length ? items.map((item, i) => `
+    const listHTML = items.length ? items.map((item, i) => `
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid #ddd">
         <span><b>${esc(item.text)}</b><br><small>${esc(new Date(item.when).toLocaleString())}</small></span>
         <button type="button" data-morni-remove="${i}" style="padding:7px 10px">Remove</button>
-      </div>`).join("") : "<small>No reminders saved in this browser yet.</small>";
+      </div>`).join("") : "<small>No upcoming reminders saved in this browser.</small>";
+
+    const html = `<small style="display:block;margin-bottom:6px;opacity:.7">${items.length}/${MAX_REMINDERS} reminder slots in use</small>${listHTML}`;
+    // Avoid needlessly changing the DOM: this panel is observed by the
+    // Device Studio mount observer.
+    if (el.innerHTML !== html) el.innerHTML = html;
   }
 
   function panelHTML() {
@@ -10702,14 +10778,14 @@ window.MORNI_V4 = {
             <button type="button" id="morniUsbSendMessage">Send to LCD</button>
           </div>
           <div style="padding:14px;border:1px solid #ddd;border-radius:12px">
-            <b>Schedule an LCD reminder</b>
+            <b>Schedule a meeting / task reminder</b>
             <input id="morniUsbWhen" type="datetime-local" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
             <input id="morniUsbReminderText" maxlength="16" placeholder="Reminder (max 16 chars)" style="display:block;width:100%;box-sizing:border-box;padding:10px;margin:8px 0">
             <button type="button" id="morniUsbAddReminder">Save reminder to MORNI</button>
-            <small style="display:block;margin-top:7px;opacity:.7">Up to 5 reminders are stored on the ESP8266 and survive a power restart using EEPROM.</small>
+            <small style="display:block;margin-top:7px;opacity:.7">Up to 5 meeting or task reminders are stored on the ESP8266 and shown on the LCD when due.</small>
           </div>
         </div>
-        <div style="margin-top:12px"><b>Saved reminders</b><div id="morniUsbReminderList"></div></div>
+        <div style="margin-top:12px"><b>Upcoming reminders</b><div id="morniUsbReminderList"></div></div>
         <div id="morniUsbLive" style="margin-top:12px;padding:10px;border-radius:10px;background:rgba(80,130,80,.08)">Hardware status: waiting for connection</div>
       </section>`;
   }
@@ -10760,9 +10836,21 @@ window.MORNI_V4 = {
   }
 
  
+function setReminderMinimum() {
+  const input = $("morniUsbWhen");
+  if (!input) return;
+
+  const localNow = new Date(Date.now() - new Date().getTimezoneOffset() * 60000)
+    .toISOString()
+    .slice(0, 16);
+  input.min = localNow;
+}
+
 function mount() {
   if ($("morniUsbPanel")) {
     bindConnectButton();
+    setReminderMinimum();
+    renderReminderList();
     return;
   }
 
@@ -10778,6 +10866,7 @@ function mount() {
   heading.insertAdjacentElement("afterend", usbPanel);
 
   bindConnectButton();
+  setReminderMinimum();
   renderReminderList();
 }
 
@@ -10787,7 +10876,17 @@ function mount() {
     const id = parts[1];
 
     if (id === "EVENT") {
-      if (parts[2] === "REMINDER") setStatus("A scheduled reminder was displayed on the LCD.", true);
+      if (parts[2] === "REMINDER") {
+        const slot = Number(parts[3]);
+        if (Number.isInteger(slot) && slot >= 0 && slot < MAX_REMINDERS) {
+          const remaining = readReminderStore().filter(item => Number(item?.slot) !== slot);
+          try { saveReminders(remaining); } catch (error) {
+            console.warn("MORNI could not update the local reminder list:", error);
+          }
+          renderReminderList();
+        }
+        setStatus("A scheduled reminder was displayed on the LCD.", true);
+      }
       return;
     }
     if (id === "READY") {
@@ -10816,7 +10915,10 @@ function mount() {
         try {
           while (true) {
             const { value, done } = await reader.read();
-            if (done) break;
+            if (done) {
+              if (connected) throw new Error("The USB serial stream closed unexpectedly.");
+              break;
+            }
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split(/\r?\n/);
             buffer = lines.pop() || "";
@@ -10828,12 +10930,30 @@ function mount() {
         }
       }
     } catch (error) {
-      if (connected) setStatus("USB read stopped: " + error.message);
+      if (connected) {
+        connected = false;
+        clearInterval(statusTimer);
+
+        for (const [id, task] of pending) {
+          clearTimeout(task.timeout);
+          task.reject(new Error("USB connection lost."));
+          pending.delete(id);
+        }
+
+        try { if (writer) writer.releaseLock(); } catch {}
+        writer = null;
+        try { if (port) await port.close(); } catch {}
+        port = null;
+
+        setStatus("USB connection lost: " + error.message);
+        window.dispatchEvent(new Event("morni-usb-disconnected"));
+      }
     }
   }
 
   async function send(op, ...args) {
     if (!connected || !writer) throw new Error("Connect MORNI by USB first.");
+
     const id = String(sequence++);
     const line = `REQ|${id}|${op}${args.length ? "|" + args.join("|") : ""}\n`;
     const promise = new Promise((resolve, reject) => {
@@ -10843,7 +10963,18 @@ function mount() {
       }, 4500);
       pending.set(id, { resolve, reject, timeout });
     });
-    await writer.write(new TextEncoder().encode(line));
+
+    try {
+      await writer.write(new TextEncoder().encode(line));
+    } catch (error) {
+      const task = pending.get(id);
+      if (task) {
+        clearTimeout(task.timeout);
+        pending.delete(id);
+      }
+      throw new Error("Could not write to MORNI over USB: " + (error?.message || String(error)));
+    }
+
     return promise;
   }
 
@@ -11002,17 +11133,32 @@ function mount() {
       const when = $("morniUsbWhen")?.value;
       const message = $("morniUsbReminderText")?.value.trim() || "";
       const epoch = Math.floor(new Date(when).getTime() / 1000);
-      if (!when || !Number.isFinite(epoch) || epoch <= Math.floor(Date.now()/1000)) {
+
+      if (!when || !Number.isFinite(epoch) || epoch <= Math.floor(Date.now() / 1000)) {
         throw new Error("Choose a future reminder time.");
       }
-      if (!message || message.length > 16) throw new Error("Reminder text must be 1-16 characters.");
-      const result = await send("REMINDER", epoch, message);
-      const slot = Number(result[2]);
+      if (!message || message.length > 16) {
+        throw new Error("Reminder text must be 1-16 characters.");
+      }
+
       const items = reminders();
-      items.push({ slot, when: new Date(epoch * 1000).toISOString(), text: message });
-      saveReminders(items);
+      if (items.length >= MAX_REMINDERS) {
+        throw new Error("All five MORNI reminder slots are in use. Remove an upcoming reminder first.");
+      }
+
+      const result = await send("REMINDER", epoch, message);
+      const slot = Number(result?.[2]);
+      if (!Number.isInteger(slot) || slot < 0 || slot >= MAX_REMINDERS) {
+        throw new Error("MORNI did not confirm a valid reminder slot. Check the firmware response.");
+      }
+
+      const updated = items.filter(item => Number(item.slot) !== slot);
+      updated.push({ slot, when: new Date(epoch * 1000).toISOString(), text: message });
+      saveReminders(updated);
       renderReminderList();
       $("morniUsbReminderText").value = "";
+      $("morniUsbWhen").value = "";
+      setReminderMinimum();
     });
     else if (t.dataset.morniCommand) run(() => send("COMMAND", t.dataset.morniCommand));
     else if (t.dataset.morniDisplay) run(() => send("DISPLAY", t.dataset.morniDisplay));
@@ -11022,8 +11168,7 @@ function mount() {
       const item = items[index];
       if (!item) return;
       await send("CANCEL", item.slot);
-      items.splice(index, 1);
-      saveReminders(items);
+      saveReminders(items.filter(saved => Number(saved.slot) !== Number(item.slot)));
       renderReminderList();
     });
   });
